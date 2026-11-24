@@ -32,6 +32,9 @@ class Product(Base):
     affiliate_rate: Mapped[float]=mapped_column(Numeric(5,2), default=10.0)
     platform_rate: Mapped[float]=mapped_column(Numeric(5,2), default=5.0)
     status: Mapped[str]=mapped_column(String(20), default='active')
+    product_type: Mapped[str]=mapped_column(String(40), default='other')
+    size_system: Mapped[str]=mapped_column(String(20), default='none')
+    has_variants: Mapped[bool]=mapped_column(default=False)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 class Link(Base):
     __tablename__='affiliate_links'
@@ -53,6 +56,9 @@ class Order(Base):
     merchant_id: Mapped[int]=mapped_column(ForeignKey('users.id'))
     affiliate_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
     quantity: Mapped[int]=mapped_column(Integer)
+    variant_id: Mapped[int|None]=mapped_column(ForeignKey('product_variants.id'), nullable=True)
+    selected_color: Mapped[str|None]=mapped_column(String(80), nullable=True)
+    selected_size: Mapped[str|None]=mapped_column(String(40), nullable=True)
     unit_price: Mapped[float]=mapped_column(Numeric(12,2))
     total: Mapped[float]=mapped_column(Numeric(12,2))
     affiliate_rate_snapshot: Mapped[float]=mapped_column(Numeric(5,2))
@@ -90,6 +96,19 @@ class Contract(Base):
     commission_rate: Mapped[float|None]=mapped_column(Numeric(5,2), nullable=True)
     penalty_terms: Mapped[str]=mapped_column(Text, default='')
     status: Mapped[str]=mapped_column(String(20), default='draft', index=True)
+    contract_number: Mapped[str|None]=mapped_column(String(40), nullable=True, unique=True)
+    starts_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int]=mapped_column(Integer, default=1)
+    platform_signer_name: Mapped[str]=mapped_column(String(160), default='Wesla Platform')
+    legal_entity_name: Mapped[str]=mapped_column(String(200), default='')
+    commission_scope: Mapped[str]=mapped_column(String(20), default='contract')
+    penalty_type: Mapped[str|None]=mapped_column(String(20), nullable=True)
+    penalty_amount: Mapped[float|None]=mapped_column(Numeric(12,2), nullable=True)
+    penalty_percent: Mapped[float|None]=mapped_column(Numeric(5,2), nullable=True)
+    termination_terms: Mapped[str]=mapped_column(Text, default='')
+    final_hash: Mapped[str|None]=mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 
 class ContractAcceptance(Base):
@@ -103,3 +122,68 @@ class ContractAcceptance(Base):
     ip_address: Mapped[str]=mapped_column(String(64), default='')
     user_agent: Mapped[str]=mapped_column(String(500), default='')
     __table_args__=(UniqueConstraint('contract_id','user_id'),)
+
+
+class ProductVariant(Base):
+    __tablename__='product_variants'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    product_id: Mapped[int]=mapped_column(ForeignKey('products.id', ondelete='CASCADE'), index=True)
+    color: Mapped[str]=mapped_column(String(80), default='')
+    size_label: Mapped[str]=mapped_column(String(40), default='')
+    size_system: Mapped[str]=mapped_column(String(20), default='none')
+    stock: Mapped[int]=mapped_column(Integer, default=0)
+    price_override: Mapped[float|None]=mapped_column(Numeric(12,2), nullable=True)
+    foot_length_cm: Mapped[float|None]=mapped_column(Numeric(5,2), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+class ProductSizeGuide(Base):
+    __tablename__='product_size_guides'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    product_id: Mapped[int]=mapped_column(ForeignKey('products.id', ondelete='CASCADE'), index=True)
+    label: Mapped[str]=mapped_column(String(80))
+    measurements: Mapped[str]=mapped_column(Text, default='{}')
+
+class ProductImage(Base):
+    __tablename__='product_images'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    product_id: Mapped[int]=mapped_column(ForeignKey('products.id', ondelete='CASCADE'), index=True)
+    storage_path: Mapped[str]=mapped_column(Text)
+    is_primary: Mapped[bool]=mapped_column(default=False)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+class ContractEvent(Base):
+    __tablename__='contract_events'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    contract_id: Mapped[int]=mapped_column(ForeignKey('contracts.id', ondelete='CASCADE'), index=True)
+    actor_user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    event_type: Mapped[str]=mapped_column(String(40))
+    details: Mapped[str]=mapped_column(Text, default='{}')
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+class ContractTerminationRequest(Base):
+    __tablename__='contract_termination_requests'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    contract_id: Mapped[int]=mapped_column(ForeignKey('contracts.id', ondelete='CASCADE'), index=True)
+    requester_user_id: Mapped[int]=mapped_column(ForeignKey('users.id'))
+    reason: Mapped[str]=mapped_column(Text)
+    evidence_paths: Mapped[str]=mapped_column(Text, default='[]')
+    status: Mapped[str]=mapped_column(String(30), default='under_review')
+    decision_reason: Mapped[str|None]=mapped_column(Text, nullable=True)
+    decided_by: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    decided_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+class CommissionChangeRequest(Base):
+    __tablename__='commission_change_requests'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    contract_id: Mapped[int|None]=mapped_column(ForeignKey('contracts.id'), nullable=True)
+    product_id: Mapped[int|None]=mapped_column(ForeignKey('products.id'), nullable=True)
+    merchant_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    affiliate_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    old_rate: Mapped[float]=mapped_column(Numeric(5,2))
+    new_rate: Mapped[float]=mapped_column(Numeric(5,2))
+    proposed_by: Mapped[int]=mapped_column(ForeignKey('users.id'))
+    affected_user_id: Mapped[int]=mapped_column(ForeignKey('users.id'))
+    status: Mapped[str]=mapped_column(String(30), default='pending')
+    accepted_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
