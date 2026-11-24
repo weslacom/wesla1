@@ -42,9 +42,9 @@ def cleanup_temporary_data_every_15_days():
         db.close()
 # Compress JSON and HTML responses to reduce bandwidth for mobile visitors.
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
-admin_origins=[x.strip().rstrip('/') for x in os.getenv('ADMIN_PORTAL_ORIGINS','https://wesla-admin-production.up.railway.app').split(',') if x.strip()]
-# The independent admin portal is a separate origin. Keep CORS and session cookies
-# configured even when the optional environment variable has not been added yet.
+admin_origins=[x.strip().rstrip('/') for x in os.getenv('ADMIN_PORTAL_ORIGINS','').split(',') if x.strip()]
+# The admin page is served from this same origin by default. Enable CORS only when
+# an explicitly configured external admin origin is intentionally used.
 if admin_origins:
     app.add_middleware(CORSMiddleware,allow_origins=admin_origins,allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Content-Type'])
 
