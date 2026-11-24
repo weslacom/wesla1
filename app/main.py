@@ -141,11 +141,19 @@ class ProductIn(BaseModel):
 class OrderIn(BaseModel):
     product_id:int; quantity:int=Field(ge=1,le=20); customer_name:str; customer_phone:str; address:str
     referral_code:str|None=None; variant_id:int|None=None
+class OrderTrackIn(BaseModel):
+    order_number:str=Field(min_length=6,max_length=32)
+    customer_phone:str=Field(min_length=5,max_length=40)
 class PayoutIn(BaseModel): amount:float=Field(gt=0); method:str; destination:str
 class ContactIn(BaseModel):
     contact_phone:str|None=Field(default=None,max_length=40)
     contact_whatsapp:str|None=Field(default=None,max_length=40)
     contact_public:bool=False
+class ProfileUpdateIn(BaseModel):
+    name:str|None=Field(default=None,min_length=2,max_length=120)
+    email:str|None=Field(default=None,min_length=5,max_length=190)
+    current_password:str|None=None
+    new_password:str|None=Field(default=None,min_length=10,max_length=128)
 class ContractRequestIn(BaseModel):
     title:str=Field(min_length=3,max_length=180)
     details:str=Field(min_length=20,max_length=5000)
@@ -233,6 +241,32 @@ def update_contact(data:ContactIn,user:User=Depends(current_user),db:Session=Dep
     user.contact_phone=phone; user.contact_whatsapp=whatsapp; user.contact_public=data.contact_public
     db.commit(); db.refresh(user)
     return {'message':'تم حفظ بيانات التواصل','user':public_user(user)}
+
+@app.patch('/api/me/profile')
+def update_profile(data:ProfileUpdateIn,request:Request,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if data.name is not None:
+        name=data.name.strip()
+        if len(name)<2: raise HTTPException(400,'الاسم يجب ألا يقل عن حرفين')
+        user.name=name
+    if data.email is not None:
+        email=data.email.strip().lower()
+        if '@' not in email or '.' not in email.split('@')[-1]:
+            raise HTTPException(400,'البريد الإلكتروني غير صحيح')
+        existing=db.scalar(select(User).where(User.email==email,User.id!=user.id))
+        if existing: raise HTTPException(409,'البريد الإلكتروني مستخدم بالفعل')
+        user.email=email
+    if data.new_password is not None:
+        if not data.current_password or not verify_password(data.current_password,user.password_hash):
+            raise HTTPException(401,'كلمة المرور الحالية غير صحيحة')
+        user.password_hash=hash_password(data.new_password)
+        token=request.cookies.get('wesla_session')
+        current_hash=hashlib.sha256(token.encode()).hexdigest() if token else None
+        for session in db.scalars(select(AuthSession).where(AuthSession.user_id==user.id)).all():
+            if session.token_hash!=current_hash: db.delete(session)
+    elif data.current_password:
+        raise HTTPException(400,'أدخل كلمة المرور الجديدة أيضًا')
+    db.commit(); db.refresh(user)
+    return {'message':'تم تحديث بيانات الحساب بنجاح','user':public_user(user)}
 
 def notify_user(db,user_id,title,body='',target_url=''):
     db.add(Notification(user_id=user_id,title=title,body=body,target_url=target_url))
@@ -370,6 +404,16 @@ def merchant_delete_product(product_id:int,user:User=Depends(require_role('merch
     soft_delete_product(product,user,db,'حذف بواسطة التاجر')
     db.commit(); return {'message':'تم نقل المنتج إلى المحذوفات المؤقتة'}
 
+@app.post('/api/merchant/products/{product_id}/restore')
+def merchant_restore_product(product_id:int,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product or product.merchant_id!=user.id or product.status!='deleted':
+        raise HTTPException(404,'المنتج المحذوف غير موجود')
+    if product.stock<=0: raise HTTPException(409,'أضف مخزونًا قبل استعادة المنتج')
+    product.status='active'; product.deleted_at=None; product.deleted_by=None; product.deleted_by_role=None; product.deleted_reason=''
+    db.add(ProductAuditEvent(product_id=product.id,actor_user_id=user.id,action='restored',details={'role':user.role}))
+    db.commit(); return {'message':'تمت استعادة المنتج ونشره من جديد'}
+
 @app.delete('/api/admin/products/{product_id}')
 def admin_delete_product(product_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     product=db.get(Product,product_id)
@@ -454,8 +498,20 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     # Hide the product from all public catalogues as soon as its total stock reaches zero.
     # Keep the product/order history in the database; it can be republished by restocking.
     if p.stock<=0: p.status='sold_out'
-    db.add(order); db.commit(); db.refresh(order)
+    db.add(order)
+    notify_user(db,p.merchant_id,'طلب جديد على منتجك',f'رقم الطلب {order.order_number} — إجمالي {total} جنيه','/dashboard')
+    if affiliate_id:
+        notify_user(db,affiliate_id,'طلب جديد من رابطك التسويقي',f'رقم الطلب {order.order_number}. ستظهر عمولتك بعد تأكيد التسليم.','/dashboard')
+    db.commit(); db.refresh(order)
     return {'order_number':order.order_number,'status':order.status,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
+@app.post('/api/orders/track')
+def track_order(data:OrderTrackIn,db:Session=Depends(get_db)):
+    row=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.order_number==data.order_number.strip().upper(),Order.customer_phone==data.customer_phone.strip())).first()
+    if not row: raise HTTPException(404,'بيانات الطلب غير صحيحة. راجع رقم الطلب ورقم الهاتف.')
+    order,title=row
+    labels={'pending':'تم استلام الطلب','confirmed':'تم تأكيد الطلب','shipped':'الطلب في الطريق إليك','delivered':'تم تسليم الطلب','cancelled':'تم إلغاء الطلب','returned':'تم إرجاع الطلب'}
+    return {'order_number':order.order_number,'product':title,'quantity':order.quantity,'total':float(order.total),'status':order.status,'status_label':labels.get(order.status,order.status),'created_at':order.created_at.isoformat()}
+
 @app.get('/api/affiliate/links')
 def affiliate_links(user:User=Depends(require_role('affiliate','admin')),limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
     excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==user.id)
@@ -479,7 +535,7 @@ def payout(data:PayoutIn,user:User=Depends(require_role('affiliate','admin')),db
 @app.get('/api/merchant/orders')
 def merchant_orders(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     rows=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.merchant_id==user.id).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
-    return [{'order_number':o.order_number,'customer_name':o.customer_name,'customer_phone':o.customer_phone,'address':o.address,'product':title,'quantity':o.quantity,'color':o.selected_color,'size':o.selected_size,'total':o.total,'status':o.status} for o,title in rows]
+    return [{'order_number':o.order_number,'customer_name':o.customer_name,'customer_phone':o.customer_phone,'address':o.address,'product':title,'quantity':o.quantity,'color':o.selected_color,'size':o.selected_size,'total':o.total,'status':o.status,'affiliate_commission':float(o.affiliate_commission or 0) if o.status=='delivered' else None,'platform_commission':float(o.platform_commission or 0) if o.status=='delivered' else None,'merchant_net':round(float(o.total or 0)-float(o.affiliate_commission or 0)-float(o.platform_commission or 0),2) if o.status=='delivered' else None} for o,title in rows]
 @app.post('/api/merchant/orders/{order_number}/status')
 def update_order(order_number:str,status:str,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     if status not in ('confirmed','shipped','delivered','cancelled','returned'): raise HTTPException(400,'حالة الطلب غير صحيحة')
@@ -493,7 +549,13 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
             v=db.get(ProductVariant,o.variant_id)
             if v: v.stock+=o.quantity
         o.affiliate_commission=0; o.platform_commission=0
-    db.commit(); return {'message':'تم تحديث حالة الطلب'}
+        notify_user(o.merchant_id,'تم إلغاء/إرجاع الطلب',f'الطلب {o.order_number} — تم إلغاء احتساب العمولات.')
+        if o.affiliate_id: notify_user(db,o.affiliate_id,'تم إلغاء عمولة طلب',f'الطلب {o.order_number} لم يكتمل، لذلك لن تُحتسب عمولة.')
+    elif status=='delivered':
+        notify_user(db,o.merchant_id,'تم تسليم الطلب',f'الطلب {o.order_number} تم تسليمه بنجاح. صافي قيمة البيع {round(float(o.total)-float(o.affiliate_commission or 0)-float(o.platform_commission or 0),2)} جنيه.')
+        if o.affiliate_id:
+            notify_user(db,o.affiliate_id,'عمولتك أصبحت مستحقة',f'تم تسليم الطلب {o.order_number}. عمولتك {o.affiliate_commission} جنيه.')
+    db.commit(); return {'message':'تم تحديث حالة الطلب. تم تحديث العمولات والإشعارات فورًا.'}
 @app.get('/api/admin/users')
 def admin_users(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.scalars(select(User).where(User.status=='active').order_by(User.name.asc()).limit(limit).offset(offset)).all()
@@ -501,7 +563,8 @@ def admin_users(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(defaul
 
 @app.get('/api/admin/overview')
 def admin_overview(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    return {'users':db.scalar(select(func.count(User.id))),'products':db.scalar(select(func.count(Product.id))),'orders':db.scalar(select(func.count(Order.id))),'sales':db.scalar(select(func.coalesce(func.sum(Order.total),0)).where(Order.status=='delivered')),'applications':db.scalar(select(func.count(Application.id)).where(Application.status=='pending')),'payouts':db.scalar(select(func.count(Payout.id)).where(Payout.status=='pending'))}
+    delivered=Order.status=='delivered'
+    return {'users':db.scalar(select(func.count(User.id))),'products':db.scalar(select(func.count(Product.id)).where(Product.status!='deleted')),'orders':db.scalar(select(func.count(Order.id))),'sales':db.scalar(select(func.coalesce(func.sum(Order.total),0)).where(delivered)),'platform_commission':db.scalar(select(func.coalesce(func.sum(Order.platform_commission),0)).where(delivered)),'affiliate_commission':db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(delivered)),'delivered_orders':db.scalar(select(func.count(Order.id)).where(delivered)),'applications':db.scalar(select(func.count(Application.id)).where(Application.status=='pending')),'payouts':db.scalar(select(func.count(Payout.id)).where(Payout.status=='pending'))}
 @app.get('/api/admin/applications')
 def admin_applications(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(select(Application,User).join(User,User.id==Application.user_id).where(Application.status=='pending').order_by(Application.created_at.desc()).limit(200)).all()
