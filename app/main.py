@@ -5,6 +5,7 @@ from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text
@@ -41,10 +42,16 @@ def cleanup_temporary_data_every_15_days():
         db.close()
 # Compress JSON and HTML responses to reduce bandwidth for mobile visitors.
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
-# Administration is hosted on the main Wesla origin at /control.
-# This keeps browser requests and the authentication cookie same-origin.
+admin_origins=[x.strip().rstrip('/') for x in os.getenv('ADMIN_PORTAL_ORIGINS','').split(',') if x.strip()]
+# The admin page is served from this same origin by default. Enable CORS only when
+# an explicitly configured external admin origin is intentionally used.
+if admin_origins:
+    app.add_middleware(CORSMiddleware,allow_origins=admin_origins,allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Content-Type'])
+
 def set_session_cookie(response:Response,token:str,max_age:int):
-    response.set_cookie('wesla_session',token,httponly=True,samesite='lax',secure=os.getenv('COOKIE_SECURE','1')=='1',max_age=max_age)
+    # Cross-origin admin fetch requires SameSite=None; browsers require Secure with None.
+    cross_origin_admin=bool(admin_origins)
+    response.set_cookie('wesla_session',token,httponly=True,samesite='none' if cross_origin_admin else 'lax',secure=True if cross_origin_admin else os.getenv('COOKIE_SECURE','0')=='1',max_age=max_age)
 @app.get('/health')
 def health(db:Session=Depends(get_db)):
     # Readiness probe: confirm the application process and PostgreSQL are both responsive.
@@ -119,27 +126,22 @@ def save_product_images(product_id:int,images:list[str],db:Session):
             if not raw or len(raw)>1_000_000: raise ValueError('image too large')
         except (ValueError,binascii.Error): raise HTTPException(400,'صيغة الصورة غير مدعومة أو حجمها أكبر من 1 ميجابايت')
         db.add(ProductImage(product_id=product_id,storage_path=data_url,is_primary=(existing==0 and index==0)))
+class AnnouncementIn(BaseModel):
+    title: str = Field(min_length=3, max_length=180)
+    body: str = Field(min_length=1, max_length=5000)
+    audience: str = Field(default='all', max_length=20)
+    target_url: str = Field(default='', max_length=500)
+    button_label: str = Field(default='', max_length=60)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+class AnnouncementStatusIn(BaseModel):
+    is_active: bool
+
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
 class AdminPasswordChange(BaseModel): current_password:str; new_password:str=Field(min_length=10,max_length=128)
-class AnnouncementCreateIn(BaseModel):
-    title:str=Field(min_length=3,max_length=180)
-    body:str=Field(default='',max_length=5000)
-    audience:str='all'
-    target_url:str=Field(default='',max_length=500)
-    button_label:str=Field(default='',max_length=60)
-    starts_at:datetime|None=None
-    ends_at:datetime|None=None
-class AnnouncementUpdateIn(BaseModel):
-    is_active:bool|None=None
-    title:str|None=Field(default=None,min_length=3,max_length=180)
-    body:str|None=Field(default=None,max_length=5000)
-    audience:str|None=None
-    target_url:str|None=Field(default=None,max_length=500)
-    button_label:str|None=Field(default=None,max_length=60)
-    starts_at:datetime|None=None
-    ends_at:datetime|None=None
 class ApplicationIn(BaseModel): role:str; details:str=''
 class VariantIn(BaseModel):
     id:int|None=None
@@ -191,12 +193,12 @@ def home():
     return FileResponse('app/static/index.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 @app.get('/control')
 def control_page():
-    # Serve the administration UI directly from the main origin. Never redirect
-    # to the legacy second service: doing so reintroduces cross-origin fetch/cookie failures.
+    # The admin portal is reachable only through its dedicated route, never from the public home page.
+    admin_url=os.getenv('ADMIN_PORTAL_URL','').strip()
+    if admin_url:
+        return RedirectResponse(admin_url,status_code=307,headers={'Cache-Control':'no-store'})
     return FileResponse('app/static/control.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 
-@app.get('/health')
-def health(): return {'ok':True,'service':'wesla'}
 @app.post('/api/register')
 def register(data:RegisterIn,db:Session=Depends(get_db)):
     email=str(data.email).lower()
@@ -583,75 +585,6 @@ def admin_users(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(defaul
 def admin_overview(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     delivered=Order.status=='delivered'
     return {'users':db.scalar(select(func.count(User.id))),'products':db.scalar(select(func.count(Product.id)).where(Product.status!='deleted')),'orders':db.scalar(select(func.count(Order.id))),'sales':db.scalar(select(func.coalesce(func.sum(Order.total),0)).where(delivered)),'platform_commission':db.scalar(select(func.coalesce(func.sum(Order.platform_commission),0)).where(delivered)),'affiliate_commission':db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(delivered)),'delivered_orders':db.scalar(select(func.count(Order.id)).where(delivered)),'applications':db.scalar(select(func.count(Application.id)).where(Application.status=='pending')),'payouts':db.scalar(select(func.count(Payout.id)).where(Payout.status=='pending'))}
-
-def announcement_dict(a:Announcement):
-    return {'id':a.id,'title':a.title,'body':a.body,'audience':a.audience,'target_url':a.target_url,'button_label':a.button_label,'is_active':a.is_active,'starts_at':a.starts_at.isoformat() if a.starts_at else None,'ends_at':a.ends_at.isoformat() if a.ends_at else None,'created_at':a.created_at.isoformat() if a.created_at else None}
-
-@app.get('/api/announcements/active')
-def active_announcements(request:Request,db:Session=Depends(get_db)):
-    role='customer'
-    raw=request.cookies.get('wesla_session')
-    if raw:
-        token_hash=hashlib.sha256(raw.encode()).hexdigest()
-        session=db.scalar(select(AuthSession).where(AuthSession.token_hash==token_hash))
-        if session:
-            expiry=session.expires_at.replace(tzinfo=timezone.utc) if session.expires_at.tzinfo is None else session.expires_at
-            if expiry>=datetime.now(timezone.utc):
-                account=db.get(User,session.user_id)
-                if account and account.status=='active': role=account.role
-    now_utc=datetime.now(timezone.utc)
-    rows=db.scalars(select(Announcement).where(
-        Announcement.is_active.is_(True),
-        Announcement.audience.in_(['all',role]),
-        (Announcement.starts_at.is_(None)) | (Announcement.starts_at<=now_utc),
-        (Announcement.ends_at.is_(None)) | (Announcement.ends_at>=now_utc)
-    ).order_by(Announcement.created_at.desc()).limit(20)).all()
-    return [announcement_dict(a) for a in rows]
-
-@app.get('/api/admin/announcements')
-def admin_announcements(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    rows=db.scalars(select(Announcement).order_by(Announcement.created_at.desc()).limit(200)).all()
-    return [announcement_dict(a) for a in rows]
-
-@app.post('/api/admin/announcements')
-def create_announcement(data:AnnouncementCreateIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    if data.audience not in ('all','customer','merchant','affiliate'):
-        raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
-    target=data.target_url.strip()
-    if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
-        raise HTTPException(400,'رابط الإعلان يجب أن يكون رابطًا داخليًا أو HTTPS')
-    if data.starts_at and data.ends_at and data.ends_at<=data.starts_at:
-        raise HTTPException(400,'وقت انتهاء الإعلان يجب أن يكون بعد وقت بدايته')
-    row=Announcement(title=data.title.strip(),body=data.body.strip(),audience=data.audience,target_url=target,button_label=data.button_label.strip(),starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
-    db.add(row);db.commit();db.refresh(row)
-    return announcement_dict(row)
-
-@app.patch('/api/admin/announcements/{announcement_id}')
-def update_announcement(announcement_id:int,data:AnnouncementUpdateIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    row=db.get(Announcement,announcement_id)
-    if not row: raise HTTPException(404,'الإعلان غير موجود')
-    values=data.model_dump(exclude_unset=True)
-    if 'audience' in values and values['audience'] not in ('all','customer','merchant','affiliate'):
-        raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
-    if 'target_url' in values:
-        target=(values['target_url'] or '').strip()
-        if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
-            raise HTTPException(400,'رابط الإعلان يجب أن يكون رابطًا داخليًا أو HTTPS')
-        values['target_url']=target
-    for key,value in values.items(): setattr(row,key,value)
-    if row.starts_at and row.ends_at and row.ends_at<=row.starts_at:
-        raise HTTPException(400,'وقت انتهاء الإعلان يجب أن يكون بعد وقت بدايته')
-    row.updated_at=datetime.now(timezone.utc)
-    db.commit();db.refresh(row)
-    return announcement_dict(row)
-
-@app.delete('/api/admin/announcements/{announcement_id}')
-def deactivate_announcement(announcement_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    row=db.get(Announcement,announcement_id)
-    if not row: raise HTTPException(404,'الإعلان غير موجود')
-    row.is_active=False;row.updated_at=datetime.now(timezone.utc)
-    db.commit()
-    return {'message':'تم إيقاف الإعلان مع الاحتفاظ بسجله'}
 @app.get('/api/admin/applications')
 def admin_applications(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(select(Application,User).join(User,User.id==Application.user_id).where(Application.status=='pending').order_by(Application.created_at.desc()).limit(200)).all()
@@ -957,46 +890,19 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     merchant=db.get(User,c.merchant_id) if c.merchant_id else None
     affiliate=db.get(User,c.affiliate_id) if c.affiliate_id else None
     admin_acceptance=next((a for a in acceptances if users_by_id.get(a.user_id) and users_by_id[a.user_id].role=='admin'),None)
-    audit_events=db.scalars(select(ContractEvent).where(ContractEvent.contract_id==c.id).order_by(ContractEvent.created_at.asc())).all()
-    final_event=next((e for e in reversed(audit_events) if e.event_type=='contract_finalized'),None)
+    final_event=db.scalars(select(ContractEvent).where(ContractEvent.contract_id==c.id,ContractEvent.event_type=='contract_finalized').order_by(ContractEvent.created_at.desc())).first()
     final_details=final_event.details if final_event and isinstance(final_event.details,dict) else {}
     snapshot=final_details.get('snapshot') if final_details else None
-    expected_snapshot_hash=hashlib.sha256(stable_contract_json(snapshot).encode()).hexdigest() if snapshot else ''
-    def acceptance_is_verified(acceptance):
-        for event in audit_events:
-            details=event.details if isinstance(event.details,dict) else {}
-            evidence=details.get('evidence')
-            if not isinstance(evidence,dict) or details.get('document_hash')!=acceptance.document_hash:
-                continue
-            evidence_hash=hashlib.sha256(stable_contract_json(evidence).encode()).hexdigest()
-            accepted_at=acceptance.accepted_at
-            if accepted_at.tzinfo is None:
-                accepted_at=accepted_at.replace(tzinfo=timezone.utc)
-            return (hmac.compare_digest(evidence_hash,acceptance.document_hash)
-                and details.get('snapshot_hash')==expected_snapshot_hash
-                and evidence.get('method')=='authenticated_explicit_consent'
-                and evidence.get('user_id')==acceptance.user_id
-                and evidence.get('accepted_name')==acceptance.full_name
-                and evidence.get('accepted_at')==accepted_at.isoformat()
-                and evidence.get('ip_address','')==(acceptance.ip_address or '')
-                and evidence.get('user_agent','')==(acceptance.user_agent or ''))
-        return False
-    verified_acceptances={a.id:acceptance_is_verified(a) for a in acceptances}
     verified=False
     if snapshot and c.final_hash:
         snapshot_json=stable_contract_json(snapshot)
         hashes=sorted(a.document_hash for a in acceptances)
         expected=hashlib.sha256((snapshot_json+'|'+'|'.join(hashes)).encode()).hexdigest()
-        required_ids=contract_party_ids(c)
-        parties_complete=bool(required_ids) and all(any(a.user_id==uid for a in acceptances) for uid in required_ids)
-        admin_complete=(c.contract_type not in ('platform_merchant','platform_affiliate')
-            or any(users_by_id.get(a.user_id) and users_by_id[a.user_id].role=='admin' for a in acceptances))
+        expected_snapshot_hash=hashlib.sha256(snapshot_json.encode()).hexdigest()
         verified=(hmac.compare_digest(expected,c.final_hash)
             and final_details.get('final_hash')==c.final_hash
             and final_details.get('snapshot_hash')==expected_snapshot_hash
-            and final_details.get('acceptance_hashes')==hashes
-            and all(verified_acceptances.values())
-            and parties_complete and admin_complete)
+            and final_details.get('acceptance_hashes')==hashes)
     penalty_type_labels={'fixed':'مبلغ ثابت','percentage':'نسبة مئوية','percent':'نسبة مئوية','both':'مبلغ ثابت ونسبة مئوية'}
     penalty_type_label=penalty_type_labels.get(c.penalty_type,c.penalty_type or 'غير محدد')
     penalty_amount_text=(f'{safe((snapshot or {}).get('penalty_amount',c.penalty_amount))} جنيه مصري' if c.penalty_amount is not None else 'غير محدد')
@@ -1007,14 +913,13 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
         if not account: continue
         accepted=next((a for a in acceptances if a.user_id==uid),None)
         if accepted:
-            integrity_label='تم التحقق من بصمة سجل الموافقة' if verified_acceptances.get(accepted.id) else 'تعذر التحقق المستقل من بصمة الموافقة'
-            signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="signature-name">{safe(accepted.full_name)}</div><div class="meta-row"><b>حساب الطرف:</b> {safe(account.name)} — {safe(account.email)} — #{safe(account.id)}</div><div class="meta-row"><b>وقت الموافقة:</b> {safe(accepted.accepted_at.isoformat())}</div><div class="meta-row"><b>وسيلة الإثبات:</b> موافقة صريحة من جلسة حساب مسجل</div><div class="meta-row"><b>عنوان الاتصال المسجل:</b> {safe(accepted.ip_address or 'غير متاح')}</div><div class="meta-row"><b>بيئة المتصفح:</b> {safe(accepted.user_agent or 'غير متاحة')}</div><div class="meta-row"><b>بصمة الموافقة SHA-256:</b><span class="hash">{safe(accepted.document_hash)}</span></div><div class="signed-status">{integrity_label}</div></section>')
+            signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="signature-name">{safe(accepted.full_name)}</div><div class="meta-row"><b>حساب الطرف:</b> {safe(account.name)} — {safe(account.email)} — #{safe(account.id)}</div><div class="meta-row"><b>وقت الموافقة:</b> {safe(accepted.accepted_at.isoformat())}</div><div class="meta-row"><b>وسيلة الإثبات:</b> موافقة صريحة من جلسة حساب مسجل</div><div class="meta-row"><b>عنوان الاتصال المسجل:</b> {safe(accepted.ip_address or 'غير متاح')}</div><div class="meta-row"><b>بيئة المتصفح:</b> {safe(accepted.user_agent or 'غير متاحة')}</div><div class="meta-row"><b>بصمة الموافقة SHA-256:</b><span class="hash">{safe(accepted.document_hash)}</span></div><div class="signed-status">موافقة إلكترونية مسجلة</div></section>')
         else:
             signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="signature-name">بانتظار الموافقة</div><div class="meta-row">لا يوجد سجل موافقة لهذا الطرف</div></section>')
     if c.contract_type in ('platform_merchant','platform_affiliate'):
         if admin_acceptance and users_by_id.get(admin_acceptance.user_id):
             admin_account=users_by_id[admin_acceptance.user_id]
-            signature_cards.append(f'<section class="signature-card"><div class="party-role">الإدارة</div><div class="signature-name">WESLA</div><div class="meta-row"><b>ممثل الإدارة المسجل:</b> {safe(admin_acceptance.full_name)} — {safe(admin_account.email)} — #{safe(admin_account.id)}</div><div class="meta-row"><b>وقت الاعتماد:</b> {safe(admin_acceptance.accepted_at.isoformat())}</div><div class="meta-row"><b>عنوان الاتصال المسجل:</b> {safe(admin_acceptance.ip_address or 'غير متاح')}</div><div class="meta-row"><b>بيئة المتصفح:</b> {safe(admin_acceptance.user_agent or 'غير متاحة')}</div><div class="meta-row"><b>بصمة موافقة الإدارة SHA-256:</b><span class="hash">{safe(admin_acceptance.document_hash)}</span></div><div class="signed-status">{'تم التحقق من بصمة سجل الاعتماد' if verified_acceptances.get(admin_acceptance.id) else 'تعذر التحقق المستقل من بصمة الاعتماد'}</div></section>')
+            signature_cards.append(f'<section class="signature-card"><div class="party-role">الإدارة</div><div class="signature-name">WESLA</div><div class="meta-row"><b>ممثل الإدارة المسجل:</b> {safe(admin_acceptance.full_name)} — {safe(admin_account.email)} — #{safe(admin_account.id)}</div><div class="meta-row"><b>وقت الاعتماد:</b> {safe(admin_acceptance.accepted_at.isoformat())}</div><div class="meta-row"><b>عنوان الاتصال المسجل:</b> {safe(admin_acceptance.ip_address or 'غير متاح')}</div><div class="meta-row"><b>بيئة المتصفح:</b> {safe(admin_acceptance.user_agent or 'غير متاحة')}</div><div class="meta-row"><b>بصمة موافقة الإدارة SHA-256:</b><span class="hash">{safe(admin_acceptance.document_hash)}</span></div><div class="signed-status">اعتماد إلكتروني مسجل من حساب الإدارة</div></section>')
         else:
             signature_cards.append('<section class="signature-card"><div class="party-role">الإدارة</div><div class="signature-name">WESLA</div><div class="meta-row">لا يوجد سجل موافقة مستقل لممثل الإدارة في هذه النسخة التاريخية؛ لا يُعرض هذا الرمز كتوقيع شخصي.</div><div class="signed-status">اعتماد ممثل الإدارة غير موثق في سجل الموافقات</div></section>')
     signatures=''.join(signature_cards)
@@ -1023,11 +928,10 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     snapshot_hash=final_details.get('snapshot_hash','') if final_details else ''
     html=f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>محضر الاتفاقية {safe(c.contract_number)}</title>
     <style>
-    @page{{size:A4 portrait;margin:8mm}}*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#fff}}body{{font:10px/1.45 Tahoma,Arial,sans-serif;color:#202938}}.paper{{width:100%;padding:12px 14px;border:3px double #b9974b;background:#fffdf7}}.brand{{display:flex;align-items:center;gap:8px;margin-bottom:5px;color:#8d6a24}}.brand-mark{{width:30px;height:30px;border:2px solid #b9974b;border-radius:50%;display:grid;place-items:center;font:bold 16px Georgia}}.brand-name{{font-size:16px;font-weight:bold}}.heading{{border-bottom:1px solid #d8c28c;padding-bottom:6px;margin-bottom:8px}}.record-banner{{display:flex;flex-wrap:wrap;justify-content:space-between;gap:5px;margin:6px 0 9px;padding:7px 9px;border:1px solid #c8b47e;border-radius:5px;background:#f7f2e5;color:#5f4a20;font-size:8.5px;font-weight:bold}}h1{{font-size:17px;color:#80601f;margin:0}}h2{{font-size:11px;color:#34445a;margin:3px 0 0}}h3{{font-size:11px;color:#80601f;border-bottom:1px solid #e6d9b7;padding-bottom:3px;margin:9px 0 5px}}.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}}.cell{{background:#f8f4e9;border:1px solid #e6d9b7;padding:5px 7px;border-radius:4px;overflow-wrap:anywhere}}.cell b{{display:block;color:#80601f;font-size:9px}}.body{{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #e6d9b7;padding:7px 9px;background:#fff;border-radius:4px;font-size:9.5px;line-height:1.5}}.clauses{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}}.penalty{{background:#fff7f0;border:1px solid #c67b48;padding:6px 8px;border-radius:4px}}.signature-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}}.signature-card{{border:1px solid #d7c18e;border-radius:5px;padding:7px;background:#fff;break-inside:avoid;overflow-wrap:anywhere}}.party-role{{font-weight:bold;color:#80601f;font-size:10px}}.signature-name{{font-family:Tahoma,Arial,sans-serif;font-size:13px;font-weight:bold;color:#203b5b;margin:3px 0 5px;min-height:18px}}.meta-row{{font-size:8px;margin:2px 0;color:#4b5563;overflow-wrap:anywhere}}.hash{{direction:ltr;display:block;font:8px monospace;overflow-wrap:anywhere}}.signed-status{{font-size:9px;font-weight:bold;color:#28734b;margin-top:4px}}.verified{{background:#e8f6ed;border:1px solid #78b68c;padding:7px;border-radius:4px;color:#17613a;font-weight:bold}}.unverified{{background:#fff4df;border:1px solid #d8a84e;padding:7px;border-radius:4px;color:#81520c;font-weight:bold}}.notice{{border:1px solid #c9d2df;background:#f5f7fa;padding:7px 9px;border-radius:4px;font-size:8.5px;line-height:1.5}}.closing{{text-align:center;font-weight:bold;color:#80601f;border-top:1px solid #d8c28c;margin:9px 0 0;padding-top:7px;font-size:12px}}button{{margin-top:8px;padding:7px 14px;border:0;border-radius:4px;background:#8d6a24;color:white;font:inherit}}@media(max-width:560px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.signature-grid,.clauses{{grid-template-columns:1fr}}.paper{{padding:8px}}}}@media print{{button{{display:none!important}}.paper{{break-inside:auto}}.signature-card,.cell,.penalty{{break-inside:avoid}}*{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}}}
+    @page{{size:A4 portrait;margin:8mm}}*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#fff}}body{{font:10px/1.45 Tahoma,Arial,sans-serif;color:#202938}}.paper{{width:100%;padding:12px 14px;border:3px double #b9974b;background:#fffdf7}}.brand{{display:flex;align-items:center;gap:8px;margin-bottom:5px;color:#8d6a24}}.brand-mark{{width:30px;height:30px;border:2px solid #b9974b;border-radius:50%;display:grid;place-items:center;font:bold 16px Georgia}}.brand-name{{font-size:16px;font-weight:bold}}.heading{{border-bottom:1px solid #d8c28c;padding-bottom:6px;margin-bottom:8px}}h1{{font-size:17px;color:#80601f;margin:0}}h2{{font-size:11px;color:#34445a;margin:3px 0 0}}h3{{font-size:11px;color:#80601f;border-bottom:1px solid #e6d9b7;padding-bottom:3px;margin:9px 0 5px}}.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}}.cell{{background:#f8f4e9;border:1px solid #e6d9b7;padding:5px 7px;border-radius:4px;overflow-wrap:anywhere}}.cell b{{display:block;color:#80601f;font-size:9px}}.body{{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #e6d9b7;padding:7px 9px;background:#fff;border-radius:4px;font-size:9.5px;line-height:1.5}}.clauses{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}}.penalty{{background:#fff7f0;border:1px solid #c67b48;padding:6px 8px;border-radius:4px}}.signature-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}}.signature-card{{border:1px solid #d7c18e;border-radius:5px;padding:7px;background:#fff;break-inside:avoid;overflow-wrap:anywhere}}.party-role{{font-weight:bold;color:#80601f;font-size:10px}}.signature-name{{font-family:Tahoma,Arial,sans-serif;font-size:13px;font-weight:bold;color:#203b5b;margin:3px 0 5px;min-height:18px}}.meta-row{{font-size:8px;margin:2px 0;color:#4b5563;overflow-wrap:anywhere}}.hash{{direction:ltr;display:block;font:8px monospace;overflow-wrap:anywhere}}.signed-status{{font-size:9px;font-weight:bold;color:#28734b;margin-top:4px}}.verified{{background:#e8f6ed;border:1px solid #78b68c;padding:7px;border-radius:4px;color:#17613a;font-weight:bold}}.unverified{{background:#fff4df;border:1px solid #d8a84e;padding:7px;border-radius:4px;color:#81520c;font-weight:bold}}.notice{{border:1px solid #c9d2df;background:#f5f7fa;padding:7px 9px;border-radius:4px;font-size:8.5px;line-height:1.5}}.closing{{text-align:center;font-weight:bold;color:#80601f;border-top:1px solid #d8c28c;margin:9px 0 0;padding-top:7px;font-size:12px}}button{{margin-top:8px;padding:7px 14px;border:0;border-radius:4px;background:#8d6a24;color:white;font:inherit}}@media(max-width:560px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.signature-grid,.clauses{{grid-template-columns:1fr}}.paper{{padding:8px}}}}@media print{{button{{display:none!important}}.paper{{break-inside:auto}}.signature-card,.cell,.penalty{{break-inside:avoid}}*{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}}}
     </style></head><body><main class="paper">
     <header class="brand"><span class="brand-mark">W</span><span class="brand-name">وصلة | WESLA</span></header>
-    <header class="heading"><h1>مستخرج سجل الاتفاقية الإلكترونية</h1><h2>{safe((snapshot or {}).get('title',c.title))} — صادر من سجل منصة وصلة</h2></header>
-    <div class="record-banner"><span>نوع المستند: مستخرج سجل إلكتروني</span><span>رقم السجل: {safe(c.contract_number or ('WESLA-'+str(c.id)))}</span><span>تاريخ إصدار المستخرج: {safe(datetime.now(timezone.utc).isoformat())}</span><span>نتيجة فحص السلامة: { 'سليم تقنيًا' if verified else 'يتطلب مراجعة' }</span></div>
+    <header class="heading"><h1>محضر توثيق اتفاقية إلكترونية</h1><h2>{safe((snapshot or {}).get('title',c.title))} — مستخرج من سجل منصة وصلة</h2></header>
     <div class="grid"><div class="cell"><b>رقم الاتفاقية</b>{safe(c.contract_number)}</div><div class="cell"><b>الإصدار</b>{safe(c.version)}</div><div class="cell"><b>الحالة الحالية</b>{safe(c.status)}</div><div class="cell"><b>تاريخ الإنشاء</b>{safe(c.created_at.isoformat() if c.created_at else '—')}</div><div class="cell"><b>تاريخ اكتمال الموافقات</b>{safe(c.approved_at.isoformat() if c.approved_at else '—')}</div><div class="cell"><b>الكيان القانوني المسجل</b>{safe((snapshot or {}).get('legal_entity_name') or 'غير محدد')}</div><div class="cell"><b>التاجر</b>{safe(merchant.name if merchant else 'غير منطبق')}</div><div class="cell"><b>المسوق</b>{safe(affiliate.name if affiliate else 'غير منطبق')}</div><div class="cell"><b>مدة الاتفاقية</b>من {safe(c.starts_at.isoformat() if c.starts_at else 'غير محدد')} إلى {safe(c.ends_at.isoformat() if c.ends_at else 'غير محدد')}</div></div>
     <h3>النص الكامل للاتفاقية</h3><article class="body">{safe((snapshot or {}).get('body',c.body))}</article>
     <div class="clauses"><section><h3>العمولات</h3><div class="cell"><b>النسبة</b>{safe((snapshot or {}).get('commission_rate',c.commission_rate))}%<br><b>النطاق</b>{safe((snapshot or {}).get('commission_scope',c.commission_scope))}</div></section><section><h3>الشروط الجزائية</h3><div class="penalty"><b>النوع:</b> {safe(penalty_type_label)}<br><b>المبلغ:</b> {penalty_amount_text}<br><b>النسبة:</b> {penalty_percent_text}<br><b>التفاصيل:</b><div class="body">{safe((snapshot or {}).get('penalty_terms') or 'لا توجد تفاصيل إضافية مسجلة')}</div></div></section></div>
@@ -1035,7 +939,7 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     <h3>سجل الموافقات الإلكترونية والأطراف</h3><div class="signature-grid">{signatures}</div>
     <h3>التحقق من سلامة سجل الاتفاقية</h3><div class="{verification_class}">{verification_text}</div>
     <div class="cell" style="margin-top:5px"><b>بصمة لقطة الإصدار SHA-256</b><span class="hash">{safe(snapshot_hash or 'غير متاحة في السجل التاريخي')}</span><b>بصمة النسخة النهائية SHA-256</b><span class="hash">{safe(c.final_hash or 'غير مسجلة')}</span></div>
-    <div class="notice" style="margin-top:7px"><b>البيان القانوني والإثباتي:</b> هذا المستند مستخرج من سجل منصة وصلة، ويعرض نص الإصدار وبيانات الحسابات وأوقات الموافقة وعناوين الاتصال وبيئة المتصفح وبصمات SHA-256 وسجل الأحداث. نتيجة «سليم تقنيًا» تعني تطابق البصمات والسجلات التي تحتفظ بها المنصة، ولا تعني وحدها التحقق من الهوية المدنية أو إثبات سيطرة الموقع وحده على وسيلة إنشاء التوقيع. وفقًا للقانون رقم 15 لسنة 2004، ولا سيما المواد 14 إلى 19، واللائحة التنفيذية، تتطلب الحجية القانونية للتوقيع الإلكتروني استيفاء شروط الارتباط بالموقّع وسيطرته وإمكان كشف التعديل، كما أن إصدار شهادات التصديق الإلكتروني نشاط مرخص. لذلك فإن موافقة الحساب المسجلة هنا دليل إلكتروني تقني مساعد وليست توقيعًا رقميًا معتمدًا أو شهادة تصديق إلكتروني. إذا كان مطلوبًا توقيع مستوفٍ للاعتماد القانوني، فيجب دمج خدمة توقيع/ختم من مقدم خدمات مرخص لدى ITIDA، مع حفظ الملف الإلكتروني الأصلي وبيانات الشهادة والتحقق والتوقيت. وتظل مراجعة الصياغة والصفة القانونية والجزاءات من اختصاص محامٍ مصري.</div>
+    <div class="notice" style="margin-top:7px"><b>تنبيه قانوني وإثباتي:</b> هذا المحضر مستخرج من سجل منصة وصلة، ويعرض بيانات الحسابات وإجراءات الموافقة والبصمات الرقمية التي سجلها النظام. لا يُعد بذاته شهادة تصديق إلكتروني أو شهادة توقيع رقمي صادرة من جهة مرخصة، ولا يثبت الهوية المدنية وحده. تخضع حجية المحررات والتوقيعات الإلكترونية للقانون رقم 15 لسنة 2004 ولائحته التنفيذية والضوابط الفنية ذات الصلة. عند اشتراط توقيع رقمي معتمد أو ختم إلكتروني، يجب إتمامه عبر مقدم خدمات مرخص من ITIDA وحفظ النسخة الإلكترونية الأصلية وسجلها.</div>
     <p class="closing">والله شاهدٌ علينا، وهو خيرُ الشاهدين.</p><button onclick="window.print()">طباعة / حفظ PDF</button></main></body></html>"""
     return HTMLResponse(html,headers={"Cache-Control":"no-store"})
 
@@ -1221,6 +1125,74 @@ def contract_action(contract_id:int,action:str,user:User=Depends(require_role('a
         c.status='draft'; contract_event(db,c,user,'returned_to_draft')
     else: raise HTTPException(400,'الإجراء غير صحيح')
     db.commit(); return {'message':'تم تحديث حالة الاتفاقية','status':c.status}
+
+
+def announcement_out(item):
+    return {'id':item.id,'title':item.title,'body':item.body,'audience':item.audience,
+        'target_url':item.target_url,'button_label':item.button_label,'is_active':item.is_active,
+        'starts_at':item.starts_at.isoformat() if item.starts_at else None,
+        'ends_at':item.ends_at.isoformat() if item.ends_at else None,
+        'created_at':item.created_at.isoformat() if item.created_at else None}
+
+@app.get('/api/announcements/active')
+def active_announcements(request:Request,db:Session=Depends(get_db)):
+    role=None
+    token=request.cookies.get('wesla_session')
+    if token:
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        session=db.scalar(select(AuthSession).where(AuthSession.token_hash==token_hash))
+        if session:
+            expires=session.expires_at.replace(tzinfo=timezone.utc) if session.expires_at.tzinfo is None else session.expires_at
+            if expires > datetime.now(timezone.utc):
+                user=db.get(User,session.user_id)
+                if user and user.status=='active' and user.role in ('customer','merchant','affiliate'):
+                    role=user.role
+    now_utc=datetime.now(timezone.utc)
+    rows=db.scalars(select(Announcement).where(
+        Announcement.is_active.is_(True),
+        Announcement.audience.in_(['all',role] if role else ['all']),
+        (Announcement.starts_at.is_(None) | (Announcement.starts_at <= now_utc)),
+        (Announcement.ends_at.is_(None) | (Announcement.ends_at > now_utc))
+    ).order_by(Announcement.created_at.desc(),Announcement.id.desc()).limit(20)).all()
+    return [announcement_out(x) for x in rows]
+
+@app.get('/api/admin/announcements')
+def admin_announcements(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Announcement).order_by(Announcement.created_at.desc(),Announcement.id.desc()).limit(200)).all()
+    return [announcement_out(x) for x in rows]
+
+@app.post('/api/admin/announcements')
+def create_announcement(data:AnnouncementIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    if data.audience not in ('all','customer','merchant','affiliate'):
+        raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    target=data.target_url.strip()
+    if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
+        raise HTTPException(400,'الرابط يجب أن يكون مسارًا داخليًا أو رابط HTTPS')
+    if data.starts_at and data.ends_at and data.ends_at <= data.starts_at:
+        raise HTTPException(400,'موعد انتهاء الإعلان يجب أن يكون بعد موعد بدايته')
+    item=Announcement(title=data.title.strip(),body=data.body.strip(),audience=data.audience,
+        target_url=target,button_label=data.button_label.strip(),is_active=True,
+        starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
+    db.add(item); db.commit(); db.refresh(item)
+    return announcement_out(item)
+
+@app.patch('/api/admin/announcements/{announcement_id}')
+def update_announcement(announcement_id:int,data:AnnouncementStatusIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    item=db.get(Announcement,announcement_id)
+    if not item: raise HTTPException(404,'الإعلان غير موجود')
+    item.is_active=data.is_active
+    item.updated_at=datetime.now(timezone.utc)
+    db.commit(); db.refresh(item)
+    return announcement_out(item)
+
+@app.delete('/api/admin/announcements/{announcement_id}')
+def stop_announcement(announcement_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    item=db.get(Announcement,announcement_id)
+    if not item: raise HTTPException(404,'الإعلان غير موجود')
+    item.is_active=False
+    item.updated_at=datetime.now(timezone.utc)
+    db.commit()
+    return {'message':'تم إيقاف الإعلان','id':item.id,'is_active':False}
 
 # Optional first administrator bootstrap: set ADMIN_EMAIL and ADMIN_PASSWORD before first run.
 def bootstrap_admin():
