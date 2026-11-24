@@ -385,11 +385,13 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     return {'order_number':order.order_number,'status':order.status,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
 @app.get('/api/affiliate/links')
 def affiliate_links(user:User=Depends(require_role('affiliate','admin')),limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
-    rows=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id).order_by(Link.created_at.desc()).limit(limit).offset(offset)).all()
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==user.id)
+    rows=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id,Product.id.not_in(excluded)).order_by(Link.created_at.desc()).limit(limit).offset(offset)).all()
     return [{'code':r.code,'product_id':r.product_id,'product':r.title,'clicks':r.clicks} for r in rows]
 @app.get('/api/affiliate/dashboard')
 def affiliate_dashboard(user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
-    links=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id).order_by(Link.created_at.desc()).limit(100)).all()
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==user.id)
+    links=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id,Product.id.not_in(excluded)).order_by(Link.created_at.desc()).limit(100)).all()
     orders=db.scalars(select(Order).where(Order.affiliate_id==user.id).order_by(Order.created_at.desc()).limit(100)).all()
     pending=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status.in_(['pending','confirmed','shipped']))) or 0
     approved=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status=='delivered')) or 0
@@ -648,7 +650,7 @@ def accept_contract(contract_id:int,data:ContractDecision,request:Request,user:U
     if not can_view_contract(c,user) or user.role=='admin': raise HTTPException(403,'هذه الاتفاقية ليست موجهة لحسابك')
     old=db.scalar(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id,ContractAcceptance.user_id==user.id))
     if old: raise HTTPException(409,'تم تسجيل موافقتك من قبل')
-    snapshot=json.dumps({'number':c.contract_number,'version':c.version,'type':c.contract_type,'title':c.title,'body':c.body,'merchant_id':c.merchant_id,'affiliate_id':c.affiliate_id,'commission_rate':str(c.commission_rate) if c.commission_rate is not None else None,'penalty_terms':c.penalty_terms,'starts_at':str(c.starts_at),'ends_at':str(c.ends_at)},ensure_ascii=False,sort_keys=True)
+    snapshot=json.dumps({'number':c.contract_number,'version':c.version,'type':c.contract_type,'title':c.title,'body':c.body,'merchant_id':c.merchant_id,'affiliate_id':c.affiliate_id,'commission_rate':str(c.commission_rate) if c.commission_rate is not None else None,'commission_scope':c.commission_scope,'penalty_terms':c.penalty_terms,'penalty_type':c.penalty_type,'penalty_amount':str(c.penalty_amount) if c.penalty_amount is not None else None,'penalty_percent':str(c.penalty_percent) if c.penalty_percent is not None else None,'termination_terms':c.termination_terms,'legal_entity_name':c.legal_entity_name,'starts_at':str(c.starts_at),'ends_at':str(c.ends_at)},ensure_ascii=False,sort_keys=True)
     digest=hashlib.sha256(snapshot.encode()).hexdigest()
     db.add(ContractAcceptance(contract_id=c.id,user_id=user.id,full_name=data.full_name.strip(),document_hash=digest,ip_address=(request.client.host if request.client else '')[:64],user_agent=request.headers.get('user-agent','')[:500]))
     contract_event(db,c,user,'party_accepted',{'name':data.full_name.strip(),'hash':digest})
@@ -672,12 +674,12 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     parties=''.join(f'<p>{a.full_name} — {a.accepted_at.isoformat()}</p>' for a in db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id)).all())
     safe=lambda x: str(x or '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
     html=f"""<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>{safe(c.contract_number)}</title>
-    <style>body{{font:16px Tahoma,Arial;line-height:2;margin:40px;color:#172338}}h1{{color:#147b91}}.sig{{display:inline-block;border:2px solid #147b91;padding:18px 32px;border-radius:12px;font:bold 26px Georgia;color:#147b91}}@media print{{button{{display:none}}}}</style>
+    <style>@page{{size:A4;margin:18mm}}body{{font:16px Tahoma,Arial;line-height:2;margin:0 auto;max-width:820px;padding:38px;color:#252a35;background:#fffdf7;border:8px double #b9974b;box-shadow:inset 0 0 0 2px #ead9ae}}h1{{color:#8d6a24;text-align:center;letter-spacing:2px;border-bottom:1px solid #d8c28c;padding-bottom:18px}}h2{{color:#34445a;text-align:center}}h3{{color:#8d6a24;border-bottom:1px solid #e6d9b7;padding-bottom:6px}}.sig{{display:inline-block;border:2px solid #b9974b;padding:18px 32px;border-radius:12px;font:bold 26px Georgia;color:#8d6a24;background:#fffaf0}}.meta{{background:#f7f0df;border:1px solid #dfcfaa;padding:12px 18px;border-radius:8px}}.ack{{margin-top:24px;padding:18px;border:1px solid #c7a65b;background:#fffaf0;white-space:pre-line}}@media print{{body{{box-shadow:none}}button{{display:none}}}}</style>
     <h1>WESLA | اتفاقية إلكترونية</h1><h2>{safe(c.title)}</h2><p>رقم العقد: {safe(c.contract_number)} | الإصدار: {c.version}</p>
     <p>الجهة المتعاقدة: {safe(c.legal_entity_name or 'الاسم القانوني للطرف المتعاقد')}</p><article>{safe(c.body).replace(chr(10),'<br>')}</article>
     <h3>العمولات</h3><p>{safe(c.commission_rate)}% — {safe(c.commission_scope)}</p><h3>الشروط الجزائية</h3><p>{safe(c.penalty_terms)}</p><p>{safe(c.termination_terms)}</p>
     <h3>موافقات الأطراف</h3>{parties}<h3>اعتماد المنصة</h3><div class="sig">WESLA</div><p>{safe(c.platform_signer_name)} — {safe(c.approved_at)}</p><p>بصمة النسخة: {safe(c.final_hash)}</p>
-    <p>هذا التوقيع والختم تمثيل بصري داخلي ولا يشكل تصديقًا حكوميًا أو توقيعًا إلكترونيًا معتمدًا.</p><button onclick="print()">طباعة / حفظ PDF</button></html>"""
+    <p class="meta">تُحفظ هذه النسخة بسجل الموافقات والبصمة الرقمية للأطراف، وتُقدَّر حجيتها وفقًا للقانون المصري والضوابط المنظمة للتوقيع الإلكتروني.</p><button onclick="print()">طباعة / حفظ PDF</button></html>"""
     return HTMLResponse(html)
 
 @app.post('/api/contracts/{contract_id}/termination')
@@ -748,7 +750,7 @@ def create_contract(data:ContractIn,user:User=Depends(require_role('admin')),db:
     if data.contract_type in ('platform_affiliate','merchant_affiliate'):
         if not data.affiliate_id or not db.get(User,data.affiliate_id) or db.get(User,data.affiliate_id).role!='affiliate': raise HTTPException(400,'اختر حساب مسوق صحيح')
     if data.commission_scope not in ('contract','all_products','product'): raise HTTPException(400,'نطاق العمولة غير صحيح')
-    c=Contract(contract_type=data.contract_type,title=data.title.strip(),body=data.body,merchant_id=data.merchant_id,affiliate_id=data.affiliate_id,commission_rate=data.commission_rate,penalty_terms=data.penalty_terms,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),starts_at=data.starts_at,ends_at=data.ends_at,legal_entity_name=data.legal_entity_name,commission_scope=data.commission_scope,penalty_type=data.penalty_type,penalty_amount=data.penalty_amount,penalty_percent=data.penalty_percent,termination_terms=data.termination_terms,platform_signer_name='WESLA | المنصة')
+    c=Contract(contract_type=data.contract_type,title=data.title.strip(),body=ensure_contract_ack(data.body),merchant_id=data.merchant_id,affiliate_id=data.affiliate_id,commission_rate=data.commission_rate,penalty_terms=data.penalty_terms,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),starts_at=data.starts_at,ends_at=data.ends_at,legal_entity_name=data.legal_entity_name,commission_scope=data.commission_scope,penalty_type=data.penalty_type,penalty_amount=data.penalty_amount,penalty_percent=data.penalty_percent,termination_terms=data.termination_terms,platform_signer_name='WESLA | المنصة')
     db.add(c); db.flush(); contract_event(db,c,user,'created',{'number':c.contract_number})
     db.commit(); db.refresh(c); return contract_out(c,db)
 
