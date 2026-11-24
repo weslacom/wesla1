@@ -835,7 +835,7 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
         accepted=acceptance_by_user.get(uid) if uid else None
         signed_name=accepted.full_name if accepted else (display_name if uid is None else 'بانتظار التوقيع')
         signed_date=accepted.accepted_at.isoformat() if accepted else (c.approved_at.isoformat() if uid is None and c.approved_at else 'اعتماد الإدارة')
-        signature_class='signature-name normal-name' if role=='التاجر' else 'signature-name'\n        signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="{signature_class}">{safe(signed_name)}</div><div class="signature-rule"></div><div class="party-name">{safe(display_name)}</div><div class="signature-date">{safe(signed_date)}</div><div class="signed-status">{"تم التوقيع إلكترونيًا" if accepted or uid is None else "بانتظار التوقيع"}</div></section>')
+        signature_class='signature-name normal-name' if role=='التاجر' else 'signature-name'\n        signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="{signature_class}">{safe(signed_name)}</div><div class="signature-rule"></div>{('<div class="party-name">'+safe(display_name)+'</div>') if uid is not None else ''}<div class="signature-date">{safe(signed_date)}</div><div class="signed-status">{"تم التوقيع إلكترونيًا" if accepted or uid is None else "بانتظار التوقيع"}</div></section>')
     signatures=''.join(signature_cards)
     penalty_type_labels={'fixed':'مبلغ ثابت','percentage':'نسبة مئوية','both':'مبلغ ثابت ونسبة مئوية'}
     penalty_type_label=penalty_type_labels.get(c.penalty_type,c.penalty_type or 'غير محدد')
