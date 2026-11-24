@@ -34,7 +34,9 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert admin_login.status_code==200
     admin_cookie=admin_login.headers.get('set-cookie','').lower()
     assert 'samesite=none' in admin_cookie and 'secure' in admin_cookie
-    assert client.get('/api/admin/overview').status_code==200
+    cookie_pair=admin_login.headers.get('set-cookie','').split(';',1)[0]
+    overview_response=client.get('/api/admin/overview',headers={'Cookie':cookie_pair})
+    assert overview_response.status_code==200, overview_response.text
     product=client.post('/api/merchant/products',json={'title':'اختبار','description':'منتج','price':125,'stock':4,'affiliate_rate':12,'platform_rate':5})
     assert product.status_code==200
     second_product=client.post('/api/merchant/products',json={'title':'اختبار ثانٍ','description':'منتج آخر','price':95,'stock':3,'affiliate_rate':10,'platform_rate':5})
