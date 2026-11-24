@@ -34,7 +34,8 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     merchant_id=registration.json()['user']['id']
 
     from app.database import SessionLocal
-    from app.models import User
+    from app.models import User, Contract
+    from sqlalchemy import select
     db=SessionLocal()
     try:
         merchant=db.get(User,merchant_id)
