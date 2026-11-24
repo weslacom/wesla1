@@ -5,16 +5,20 @@ from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from .database import Base, engine, get_db, SessionLocal
-from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest
+from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification
 
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
 # Compress JSON and HTML responses to reduce bandwidth for mobile visitors.
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+admin_origins=[x.strip() for x in os.getenv('ADMIN_PORTAL_ORIGINS','').split(',') if x.strip()]
+if admin_origins:
+    app.add_middleware(CORSMiddleware,allow_origins=admin_origins,allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Content-Type'])
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 
 # Passwords use PBKDF2; sessions are random opaque tokens stored only as hashes.
@@ -40,7 +44,7 @@ def require_role(*roles):
         return user
     return dep
 
-def public_user(u): return {'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status}
+def public_user(u): return {'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status,'contact_phone':u.contact_phone,'contact_whatsapp':u.contact_whatsapp,'contact_public':u.contact_public}
 def products_out(rows,db):
     """Serialize a page of products with a fixed number of queries (not N+1 queries)."""
     if not rows: return []
@@ -90,12 +94,32 @@ class OrderIn(BaseModel):
     product_id:int; quantity:int=Field(ge=1,le=20); customer_name:str; customer_phone:str; address:str
     referral_code:str|None=None; variant_id:int|None=None
 class PayoutIn(BaseModel): amount:float=Field(gt=0); method:str; destination:str
+class ContactIn(BaseModel):
+    contact_phone:str|None=Field(default=None,max_length=40)
+    contact_whatsapp:str|None=Field(default=None,max_length=40)
+    contact_public:bool=False
+class ContractRequestIn(BaseModel):
+    title:str=Field(min_length=3,max_length=180)
+    details:str=Field(min_length=20,max_length=5000)
+    desired_commission:float|None=Field(default=None,ge=0,le=100)
+class ContractRequestDecision(BaseModel):
+    decision:str
+    admin_note:str=Field(default='',max_length=2000)
+class ContractNegotiationIn(BaseModel):
+    proposal_text:str=Field(min_length=5,max_length=5000)
+    reason:str=Field(default='',max_length=2000)
+    recipient_user_id:int|None=None
+class ContractNegotiationResponseIn(BaseModel):
+    decision:str
+    response_text:str=Field(default='',max_length=5000)
 
 @app.get('/')
-def home(): return FileResponse('app/static/index.html')
+def home(): return FileResponse('app/static/index.html',headers={'Cache-Control':'public, max-age=60, stale-while-revalidate=300'})
 @app.get('/control')
 def control_page():
-    # The console authenticates via admin-only APIs; never redirect users to public home.
+    # Once the independent admin portal is deployed, keep its assets off the public site.
+    admin_url=os.getenv('ADMIN_PORTAL_URL','').strip()
+    if admin_url: return RedirectResponse(admin_url,status_code=307)
     return FileResponse('app/static/control.html')
 
 @app.get('/health')
@@ -148,6 +172,32 @@ def logout(response:Response,request:Request,db:Session=Depends(get_db)):
     response.delete_cookie('wesla_session'); return {'ok':True}
 @app.get('/api/me')
 def me(user:User=Depends(current_user)): return {'user':public_user(user)}
+
+@app.patch('/api/me/contact')
+def update_contact(data:ContactIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    phone=(data.contact_phone or '').strip() or None
+    whatsapp=(data.contact_whatsapp or '').strip() or None
+    if data.contact_public and not (phone or whatsapp):
+        raise HTTPException(400,'أضف رقم هاتف أو واتساب قبل إظهار بيانات التواصل')
+    user.contact_phone=phone; user.contact_whatsapp=whatsapp; user.contact_public=data.contact_public
+    db.commit(); db.refresh(user)
+    return {'message':'تم حفظ بيانات التواصل','user':public_user(user)}
+
+def notify_user(db,user_id,title,body='',target_url=''):
+    db.add(Notification(user_id=user_id,title=title,body=body,target_url=target_url))
+
+@app.get('/api/notifications/my')
+def my_notifications(limit:int=Query(default=30,ge=1,le=100),user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc()).limit(limit)).all()
+    unread=db.scalar(select(func.count(Notification.id)).where(Notification.user_id==user.id,Notification.read_at.is_(None))) or 0
+    return {'unread':unread,'items':[{'id':n.id,'title':n.title,'body':n.body,'target_url':n.target_url,'read':n.read_at is not None,'created_at':n.created_at.isoformat()} for n in rows]}
+
+@app.post('/api/notifications/{notification_id}/read')
+def read_notification(notification_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    n=db.get(Notification,notification_id)
+    if not n or n.user_id!=user.id: raise HTTPException(404,'الإشعار غير موجود')
+    if n.read_at is None: n.read_at=datetime.now(timezone.utc); db.commit()
+    return {'ok':True}
 @app.post('/api/applications')
 def apply(data:ApplicationIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     if data.role not in ('merchant','affiliate'): raise HTTPException(400,'نوع الحساب غير صحيح')
@@ -205,10 +255,104 @@ def merchant_product_detail(product_id:int,user:User=Depends(require_role('merch
     if not p or (user.role!='admin' and p.merchant_id!=user.id): raise HTTPException(404,'المنتج غير موجود')
     return product_out(p,db)
 
+@app.get('/api/public/stores/{user_id}')
+def public_store(user_id:int,response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+    owner=db.get(User,user_id)
+    if not owner or owner.role!='merchant' or owner.status!='active': raise HTTPException(404,'المتجر غير موجود')
+    rows=db.scalars(select(Product).where(Product.merchant_id==owner.id,Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    items=products_out(rows,db)
+    for item in items:
+        item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
+    response.headers['Cache-Control']='public, max-age=30, stale-while-revalidate=120'
+    return {'id':owner.id,'name':owner.name,'products':items,'contact_phone':owner.contact_phone if owner.contact_public else None,'contact_whatsapp':owner.contact_whatsapp if owner.contact_public else None}
+
+@app.get('/api/public/marketers/{user_id}')
+def public_marketer(user_id:int,response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+    owner=db.get(User,user_id)
+    if not owner or owner.role!='affiliate' or owner.status!='active': raise HTTPException(404,'صفحة المسوق غير موجودة')
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==owner.id)
+    rows=db.execute(select(Link,Product).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==owner.id,Product.status=='active',Product.id.not_in(excluded)).order_by(Link.created_at.desc()).limit(limit).offset(offset)).all()
+    products=products_out([p for _,p in rows],db)
+    for item in products:
+        item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
+    links_by_product={link.product_id:link for link,_ in rows}
+    for item in products:
+        link=links_by_product[item['id']]
+        item['referral_url']=f"/r/{link.code}"; item['clicks']=link.clicks
+    response.headers['Cache-Control']='public, max-age=30, stale-while-revalidate=120'
+    return {'id':owner.id,'name':owner.name,'products':products,'contact_phone':owner.contact_phone if owner.contact_public else None,'contact_whatsapp':owner.contact_whatsapp if owner.contact_public else None}
+
+@app.get('/store/{user_id}')
+def store_page(user_id:int): return FileResponse('app/static/index.html')
+@app.get('/marketer/{user_id}')
+def marketer_page(user_id:int): return FileResponse('app/static/index.html')
+@app.get('/p/{product_id}')
+def product_share_page(product_id:int): return RedirectResponse(url=f'/?product={product_id}',status_code=302)
+
+def soft_delete_product(product:Product,actor:User,db:Session,reason:str=''):
+    if product.status=='deleted': raise HTTPException(409,'المنتج محذوف بالفعل')
+    active_order=db.scalar(select(Order.id).where(Order.product_id==product.id,Order.status.in_(['pending','confirmed','shipped'])).limit(1))
+    if active_order: raise HTTPException(409,'لا يمكن حذف المنتج لوجود طلبات نشطة مرتبطة به')
+    product.status='deleted'; product.deleted_at=datetime.now(timezone.utc)
+    product.deleted_by=actor.id; product.deleted_by_role=actor.role; product.deleted_reason=reason[:2000]
+    db.add(ProductAuditEvent(product_id=product.id,actor_user_id=actor.id,action='soft_deleted',details={'role':actor.role,'reason':reason[:2000]}))
+
+@app.delete('/api/merchant/products/{product_id}')
+def merchant_delete_product(product_id:int,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product or product.merchant_id!=user.id: raise HTTPException(404,'المنتج غير موجود')
+    soft_delete_product(product,user,db,'حذف بواسطة التاجر')
+    db.commit(); return {'message':'تم نقل المنتج إلى المحذوفات المؤقتة'}
+
+@app.delete('/api/admin/products/{product_id}')
+def admin_delete_product(product_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product: raise HTTPException(404,'المنتج غير موجود')
+    soft_delete_product(product,user,db,'حذف إداري')
+    db.commit(); return {'message':'تم إخفاء المنتج وتسجيل العملية في سجل المراجعة'}
+
+@app.post('/api/admin/products/{product_id}/restore')
+def admin_restore_product(product_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product or product.status!='deleted': raise HTTPException(404,'المنتج المحذوف غير موجود')
+    product.status='active'; product.deleted_at=None; product.deleted_by=None; product.deleted_by_role=None; product.deleted_reason=''
+    db.add(ProductAuditEvent(product_id=product.id,actor_user_id=user.id,action='restored',details={}))
+    db.commit(); return {'message':'تمت استعادة المنتج'}
+
+@app.get('/api/admin/products')
+def admin_products(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Product).order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    items=products_out(rows,db)
+    for item in items:
+        item['deleted_at']=next((p.deleted_at.isoformat() for p in rows if p.id==item['id'] and p.deleted_at),None)
+        item['deleted_by_role']=next((p.deleted_by_role for p in rows if p.id==item['id']),None)
+    return items
+
+@app.delete('/api/affiliate/products/{product_id}')
+def affiliate_hide_product(product_id:int,user:User=Depends(require_role('affiliate')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product or product.status!='active': raise HTTPException(404,'المنتج غير موجود')
+    old=db.scalar(select(AffiliateProductExclusion).where(AffiliateProductExclusion.affiliate_id==user.id,AffiliateProductExclusion.product_id==product.id))
+    if not old:
+        db.add(AffiliateProductExclusion(affiliate_id=user.id,product_id=product.id))
+        db.add(ProductAuditEvent(product_id=product.id,actor_user_id=user.id,action='hidden_by_affiliate',details={'affiliate_id':user.id}))
+    db.commit(); return {'message':'تمت إزالة المنتج من قائمتك التسويقية فقط، ولم يُحذف من متجر التاجر'}
+
+@app.get('/api/affiliate/products')
+def affiliate_available_products(limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('affiliate')),db:Session=Depends(get_db)):
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==user.id)
+    rows=db.scalars(select(Product).where(Product.status=='active',Product.id.not_in(excluded)).order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    items=products_out(rows,db)
+    for item in items:
+        item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
+    return items
+
 @app.post('/api/affiliate/links/{product_id}')
 def create_link(product_id:int,user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
     p=db.get(Product,product_id)
     if not p or p.status!='active': raise HTTPException(404,'المنتج غير موجود')
+    hidden=db.scalar(select(AffiliateProductExclusion).where(AffiliateProductExclusion.affiliate_id==user.id,AffiliateProductExclusion.product_id==product_id))
+    if hidden: db.delete(hidden)
     link=db.scalar(select(Link).where(Link.affiliate_id==user.id,Link.product_id==product_id))
     if not link:
         link=Link(code=secrets.token_urlsafe(8),affiliate_id=user.id,product_id=product_id); db.add(link); db.commit(); db.refresh(link)
@@ -243,26 +387,28 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     return {'order_number':order.order_number,'status':order.status,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
 @app.get('/api/affiliate/links')
 def affiliate_links(user:User=Depends(require_role('affiliate','admin')),limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
-    rows=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id).order_by(Link.created_at.desc()).limit(limit).offset(offset)).all()
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==user.id)
+    rows=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id,Product.id.not_in(excluded)).order_by(Link.created_at.desc()).limit(limit).offset(offset)).all()
     return [{'code':r.code,'product_id':r.product_id,'product':r.title,'clicks':r.clicks} for r in rows]
 @app.get('/api/affiliate/dashboard')
 def affiliate_dashboard(user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
-    links=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id).order_by(Link.created_at.desc()).limit(100)).all()
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==user.id)
+    links=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id,Product.id.not_in(excluded)).order_by(Link.created_at.desc()).limit(100)).all()
     orders=db.scalars(select(Order).where(Order.affiliate_id==user.id).order_by(Order.created_at.desc()).limit(100)).all()
     pending=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status.in_(['pending','confirmed','shipped']))) or 0
     approved=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status=='delivered')) or 0
     return {'links':[{'code':r.code,'product_id':r.product_id,'product':r.title,'clicks':r.clicks} for r in links],'orders':[{'order_number':o.order_number,'total':o.total,'commission':o.affiliate_commission,'status':o.status} for o in orders],'pending':round(float(pending),2),'approved':round(float(approved),2)}
 @app.post('/api/affiliate/payouts')
 def payout(data:PayoutIn,user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
-    delivered=db.scalars(select(Order).where(Order.affiliate_id==user.id,Order.status=='delivered')).all(); earned=sum(o.affiliate_commission for o in delivered)
-    paid=sum(x.amount for x in db.scalars(select(Payout).where(Payout.affiliate_id==user.id,Payout.status.in_(['approved','paid']))).all())
-    pending=sum(x.amount for x in db.scalars(select(Payout).where(Payout.affiliate_id==user.id,Payout.status=='pending')).all())
+    earned=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status=='delivered')) or 0
+    paid=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.affiliate_id==user.id,Payout.status.in_(['approved','paid']))) or 0
+    pending=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.affiliate_id==user.id,Payout.status=='pending')) or 0
     if Decimal(str(data.amount))>Decimal(str(earned))-Decimal(str(paid))-Decimal(str(pending)): raise HTTPException(400,'المبلغ يتجاوز رصيدك القابل للسحب')
     p=Payout(affiliate_id=user.id,amount=Decimal(str(data.amount)),method=data.method,destination=data.destination); db.add(p); db.commit(); return {'message':'تم إرسال طلب السحب للإدارة'}
 @app.get('/api/merchant/orders')
-def merchant_orders(user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
-    rows=db.scalars(select(Order).where(Order.merchant_id==user.id).order_by(Order.created_at.desc())).all()
-    return [{'order_number':o.order_number,'customer_name':o.customer_name,'customer_phone':o.customer_phone,'address':o.address,'product':db.get(Product,o.product_id).title,'quantity':o.quantity,'color':o.selected_color,'size':o.selected_size,'total':o.total,'status':o.status} for o in rows]
+def merchant_orders(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
+    rows=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.merchant_id==user.id).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
+    return [{'order_number':o.order_number,'customer_name':o.customer_name,'customer_phone':o.customer_phone,'address':o.address,'product':title,'quantity':o.quantity,'color':o.selected_color,'size':o.selected_size,'total':o.total,'status':o.status} for o,title in rows]
 @app.post('/api/merchant/orders/{order_number}/status')
 def update_order(order_number:str,status:str,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     if status not in ('confirmed','shipped','delivered','cancelled','returned'): raise HTTPException(400,'حالة الطلب غير صحيحة')
@@ -278,8 +424,8 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
         o.affiliate_commission=0; o.platform_commission=0
     db.commit(); return {'message':'تم تحديث حالة الطلب'}
 @app.get('/api/admin/users')
-def admin_users(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    rows=db.scalars(select(User).where(User.status=='active').order_by(User.name.asc())).all()
+def admin_users(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(User).where(User.status=='active').order_by(User.name.asc()).limit(limit).offset(offset)).all()
     return [{'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status} for u in rows]
 
 @app.get('/api/admin/overview')
@@ -287,7 +433,8 @@ def admin_overview(user:User=Depends(require_role('admin')),db:Session=Depends(g
     return {'users':db.scalar(select(func.count(User.id))),'products':db.scalar(select(func.count(Product.id))),'orders':db.scalar(select(func.count(Order.id))),'sales':db.scalar(select(func.coalesce(func.sum(Order.total),0)).where(Order.status=='delivered')),'applications':db.scalar(select(func.count(Application.id)).where(Application.status=='pending')),'payouts':db.scalar(select(func.count(Payout.id)).where(Payout.status=='pending'))}
 @app.get('/api/admin/applications')
 def admin_applications(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    return [{'id':a.id,'name':db.get(User,a.user_id).name,'email':db.get(User,a.user_id).email,'role':a.requested_role,'details':a.details,'status':a.status} for a in db.scalars(select(Application).where(Application.status=='pending')).all()]
+    rows=db.execute(select(Application,User).join(User,User.id==Application.user_id).where(Application.status=='pending').order_by(Application.created_at.desc()).limit(200)).all()
+    return [{'id':a.id,'name':owner.name,'email':owner.email,'role':a.requested_role,'details':a.details,'status':a.status} for a,owner in rows]
 @app.post('/api/admin/applications/{app_id}/{decision}')
 def decide_application(app_id:int,decision:str,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if decision not in ('approve','reject'): raise HTTPException(400,'القرار غير صحيح')
@@ -297,11 +444,13 @@ def decide_application(app_id:int,decision:str,user:User=Depends(require_role('a
     if decision=='approve': db.get(User,a.user_id).role=a.requested_role
     db.commit(); return {'message':'تمت مراجعة الطلب'}
 @app.get('/api/admin/orders')
-def admin_orders(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    return [{'order_number':o.order_number,'customer':o.customer_name,'total':o.total,'affiliate_commission':o.affiliate_commission,'platform_commission':o.platform_commission,'status':o.status} for o in db.scalars(select(Order).order_by(Order.created_at.desc())).all()]
+def admin_orders(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Order).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
+    return [{'order_number':o.order_number,'customer':o.customer_name,'total':o.total,'affiliate_commission':o.affiliate_commission,'platform_commission':o.platform_commission,'status':o.status} for o in rows]
 @app.get('/api/admin/payouts')
-def admin_payouts(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    return [{'id':p.id,'affiliate':db.get(User,p.affiliate_id).name,'amount':p.amount,'method':p.method,'destination':p.destination,'status':p.status} for p in db.scalars(select(Payout).where(Payout.status=='pending')).all()]
+def admin_payouts(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(select(Payout,User.name).join(User,User.id==Payout.affiliate_id).where(Payout.status=='pending').order_by(Payout.created_at.desc()).limit(limit).offset(offset)).all()
+    return [{'id':p.id,'affiliate':name,'amount':p.amount,'method':p.method,'destination':p.destination,'status':p.status} for p,name in rows]
 @app.post('/api/admin/payouts/{payout_id}/{decision}')
 def decide_payout(payout_id:int,decision:str,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if decision not in ('approve','reject','paid'): raise HTTPException(400,'القرار غير صحيح')
@@ -375,6 +524,118 @@ def contract_out(c,db):
       'acceptances':[{'user_id':a.user_id,'full_name':a.full_name,'accepted_at':a.accepted_at.isoformat(),'document_hash':a.document_hash} for a in accepts],
       'events':[{'event':e.event_type,'details':e.details if isinstance(e.details,dict) else (json.loads(e.details) if isinstance(e.details,str) and e.details else {}),'created_at':e.created_at.isoformat()} for e in events]}
 
+CONTRACT_ACKNOWLEDGEMENT="""إقرار بالموافقة والالتزام
+أقرّ أنا الطرف الموقّع أدناه بأنني اطّلعت على جميع بنود هذه الاتفاقية وشروطها، وفهمت مضمونها وآثارها، وأوافق عليها بإرادتي الحرة ورضاي التام، وأتعهد بالالتزام بما ورد فيها من حقوق والتزامات.
+وتُعد موافقتي المثبتة إلكترونيًا دليلًا على قبولي والتزامي بهذه البنود، وتكون حجةً بين أطراف الاتفاقية في الحدود التي يقررها القانون المصري ومتى ثبتت صحة نسبتها إلى صاحبها.
+(والله شاهدٌ علينا)"""
+
+def ensure_contract_ack(body:str)->str:
+    if 'والله شاهد' in (body or ''): return body
+    return (body or '').rstrip()+chr(10)+chr(10)+CONTRACT_ACKNOWLEDGEMENT
+
+def contract_request_out(row,owner):
+    return {'id':row.id,'requested_type':row.requested_type,'title':row.title,'details':row.details,'desired_commission':row.desired_commission,'status':row.status,'admin_note':row.admin_note,'created_at':row.created_at.isoformat(),'user_id':owner.id,'user_name':owner.name,'user_email':owner.email}
+
+@app.post('/api/contracts/request')
+def request_platform_contract(data:ContractRequestIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if user.role not in ('merchant','affiliate'):
+        raise HTTPException(403,'طلب التعاقد مع المنصة متاح للتاجر والمسوق فقط')
+    requested_type='platform_merchant' if user.role=='merchant' else 'platform_affiliate'
+    pending=db.scalar(select(ContractRequest).where(ContractRequest.user_id==user.id,ContractRequest.status=='pending'))
+    if pending: raise HTTPException(409,'لديك طلب تعاقد قيد المراجعة بالفعل')
+    row=ContractRequest(user_id=user.id,requested_type=requested_type,title=data.title.strip(),details=data.details.strip(),desired_commission=data.desired_commission)
+    db.add(row)
+    admins=db.scalars(select(User).where(User.role=='admin',User.status=='active')).all()
+    for admin in admins: notify_user(db,admin.id,'طلب تعاقد جديد',f'{user.name} أرسل طلب تعاقد: {data.title}','/control')
+    db.commit()
+    return {'message':'تم إرسال طلب التعاقد إلى إدارة وصلة','request_id':row.id}
+
+@app.get('/api/contracts/requests/my')
+def my_contract_requests(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(ContractRequest).where(ContractRequest.user_id==user.id).order_by(ContractRequest.created_at.desc()).limit(50)).all()
+    return [{'id':x.id,'title':x.title,'status':x.status,'admin_note':x.admin_note,'created_at':x.created_at.isoformat()} for x in rows]
+
+@app.get('/api/admin/contract-requests')
+def admin_contract_requests(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(select(ContractRequest,User).join(User,User.id==ContractRequest.user_id).order_by(ContractRequest.created_at.desc()).limit(200)).all()
+    return [contract_request_out(row,owner) for row,owner in rows]
+
+@app.post('/api/admin/contract-requests/{request_id}/decision')
+def decide_contract_request(request_id:int,data:ContractRequestDecision,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    row=db.get(ContractRequest,request_id)
+    if not row or row.status!='pending': raise HTTPException(404,'طلب التعاقد غير موجود أو تمت مراجعته')
+    if data.decision not in ('approve','reject'): raise HTTPException(400,'القرار غير صحيح')
+    owner=db.get(User,row.user_id)
+    row.status='approved' if data.decision=='approve' else 'rejected'
+    row.admin_note=data.admin_note.strip(); row.reviewed_by=user.id; row.reviewed_at=datetime.now(timezone.utc)
+    contract_id=None
+    if data.decision=='approve':
+        contract=Contract(contract_type=row.requested_type,title=row.title,body=ensure_contract_ack(row.details),merchant_id=owner.id if owner.role=='merchant' else None,affiliate_id=owner.id if owner.role=='affiliate' else None,commission_rate=row.desired_commission,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),legal_entity_name=owner.name,commission_scope='contract',platform_signer_name='WESLA | المنصة')
+        db.add(contract); db.flush(); contract_event(db,contract,user,'created_from_request',{'request_id':row.id}); contract_id=contract.id
+    notify_user(db,owner.id,'تحديث طلب التعاقد',('تمت الموافقة على طلبك وإنشاء مسودة اتفاقية' if data.decision=='approve' else 'تم رفض طلب التعاقد')+ (': '+row.admin_note if row.admin_note else ''),'/')
+    db.commit()
+    return {'message':'تمت مراجعة طلب التعاقد','status':row.status,'contract_id':contract_id}
+
+@app.post('/api/contracts/{contract_id}/negotiations')
+def create_contract_negotiation(contract_id:int,data:ContractNegotiationIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    contract=db.get(Contract,contract_id)
+    if not contract or not can_view_contract(contract,user) or contract.status in ('archived','terminated'):
+        raise HTTPException(404,'الاتفاقية غير متاحة للتفاوض')
+    if user.role=='admin':
+        recipient_id=data.recipient_user_id
+        if not recipient_id or recipient_id not in contract_party_ids(contract): raise HTTPException(400,'حدد الطرف المستلم للمقترح')
+    elif contract.contract_type=='merchant_affiliate':
+        recipient_id=contract.affiliate_id if user.id==contract.merchant_id else contract.merchant_id
+    else:
+        recipient_id=db.scalar(select(User.id).where(User.role=='admin',User.status=='active').order_by(User.id).limit(1))
+    if not recipient_id or recipient_id==user.id: raise HTTPException(400,'تعذر تحديد الطرف الآخر في الاتفاقية')
+    recipient=db.get(User,recipient_id)
+    if not recipient: raise HTTPException(404,'الطرف المستلم غير موجود')
+    negotiation=ContractNegotiation(contract_id=contract.id,proposer_id=user.id,recipient_id=recipient.id,proposal_text=data.proposal_text.strip(),reason=data.reason.strip())
+    db.add(negotiation)
+    notify_user(db,recipient.id,'مقترح تفاوض على اتفاقية',f'{user.name} أرسل مقترحًا على الاتفاقية {contract.contract_number}',f'/')
+    db.commit(); db.refresh(negotiation)
+    return {'message':'تم إرسال المقترح للطرف الآخر','negotiation_id':negotiation.id,'status':negotiation.status}
+
+@app.get('/api/contracts/{contract_id}/negotiations')
+def list_contract_negotiations(contract_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    contract=db.get(Contract,contract_id)
+    if not contract or not can_view_contract(contract,user): raise HTTPException(404,'الاتفاقية غير موجودة')
+    rows=db.scalars(select(ContractNegotiation).where(ContractNegotiation.contract_id==contract.id).order_by(ContractNegotiation.created_at.asc()).limit(200)).all()
+    return [{'id':n.id,'proposer_id':n.proposer_id,'recipient_id':n.recipient_id,'proposal_text':n.proposal_text,'reason':n.reason,'response_text':n.response_text,'status':n.status,'parent_id':n.parent_id,'created_at':n.created_at.isoformat()} for n in rows]
+
+@app.post('/api/contract-negotiations/{negotiation_id}/respond')
+def respond_contract_negotiation(negotiation_id:int,data:ContractNegotiationResponseIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    row=db.get(ContractNegotiation,negotiation_id)
+    if not row or row.status!='pending': raise HTTPException(404,'مقترح التفاوض غير موجود أو تمت مراجعته')
+    if user.id!=row.recipient_id and user.role!='admin': raise HTTPException(403,'هذا المقترح ليس موجّهًا لحسابك')
+    if data.decision not in ('accept','reject','counter'): raise HTTPException(400,'قرار التفاوض غير صحيح')
+    if data.decision in ('reject','counter') and len(data.response_text.strip())<5: raise HTTPException(400,'اكتب ردًا أو صياغة بديلة واضحة')
+    row.response_text=data.response_text.strip(); row.status={'accept':'accepted','reject':'rejected','counter':'countered'}[data.decision]; row.responded_at=datetime.now(timezone.utc)
+    new_contract_id=None
+    if data.decision=='counter':
+        counter=ContractNegotiation(contract_id=row.contract_id,proposer_id=user.id,recipient_id=row.proposer_id,parent_id=row.id,proposal_text=data.response_text.strip(),reason='صياغة بديلة مقدمة ردًا على المقترح')
+        db.add(counter); notify_user(db,row.proposer_id,'تم تقديم صياغة تفاوضية بديلة',f'يوجد رد بديل على المقترح رقم {row.id}','/')
+    elif data.decision=='accept':
+        original=db.get(Contract,row.contract_id)
+        next_version=original.version+1
+        number=f'{original.contract_number}-V{next_version}'
+        revised_body=ensure_contract_ack(original.body+chr(10)+chr(10)+'بند مضاف نتيجة التفاوض'+chr(10)+row.proposal_text)
+        revised=Contract(contract_type=original.contract_type,title=f'{original.title} — الإصدار {next_version}',body=revised_body,merchant_id=original.merchant_id,affiliate_id=original.affiliate_id,commission_rate=original.commission_rate,penalty_terms=original.penalty_terms,status='draft',contract_number=number,starts_at=original.starts_at,ends_at=original.ends_at,version=next_version,platform_signer_name=original.platform_signer_name,legal_entity_name=original.legal_entity_name,commission_scope=original.commission_scope,penalty_type=original.penalty_type,penalty_amount=original.penalty_amount,penalty_percent=original.penalty_percent,termination_terms=original.termination_terms)
+        db.add(revised); db.flush(); new_contract_id=revised.id
+        contract_event(db,original,user,'negotiation_accepted_new_version',{'negotiation_id':row.id,'new_contract_id':new_contract_id,'version':next_version})
+        contract_event(db,revised,user,'created_from_negotiation',{'source_contract_id':original.id,'negotiation_id':row.id})
+        for party_id in contract_party_ids(original): notify_user(db,party_id,'تم قبول مقترح التفاوض','تم إنشاء إصدار جديد كمسودة، ويجب على الأطراف مراجعته وتوقيعه من جديد','/')
+    else:
+        notify_user(db,row.proposer_id,'تم رفض مقترح التفاوض',data.response_text.strip(),'/')
+    db.commit()
+    return {'message':'تم تسجيل الرد على المقترح','status':row.status,'new_contract_id':new_contract_id}
+
+@app.get('/api/contracts/negotiations/my')
+def my_contract_negotiations(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(ContractNegotiation).where((ContractNegotiation.proposer_id==user.id)|(ContractNegotiation.recipient_id==user.id)).order_by(ContractNegotiation.created_at.desc()).limit(100)).all()
+    return [{'id':n.id,'contract_id':n.contract_id,'proposer_id':n.proposer_id,'recipient_id':n.recipient_id,'proposal_text':n.proposal_text,'response_text':n.response_text,'status':n.status,'created_at':n.created_at.isoformat()} for n in rows]
+
 @app.get('/api/contracts/my')
 def my_contracts(user:User=Depends(current_user),db:Session=Depends(get_db)):
     rows=db.scalars(select(Contract).order_by(Contract.created_at.desc())).all()
@@ -394,7 +655,7 @@ def accept_contract(contract_id:int,data:ContractDecision,request:Request,user:U
     if not can_view_contract(c,user) or user.role=='admin': raise HTTPException(403,'هذه الاتفاقية ليست موجهة لحسابك')
     old=db.scalar(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id,ContractAcceptance.user_id==user.id))
     if old: raise HTTPException(409,'تم تسجيل موافقتك من قبل')
-    snapshot=json.dumps({'number':c.contract_number,'version':c.version,'type':c.contract_type,'title':c.title,'body':c.body,'merchant_id':c.merchant_id,'affiliate_id':c.affiliate_id,'commission_rate':str(c.commission_rate) if c.commission_rate is not None else None,'penalty_terms':c.penalty_terms,'starts_at':str(c.starts_at),'ends_at':str(c.ends_at)},ensure_ascii=False,sort_keys=True)
+    snapshot=json.dumps({'number':c.contract_number,'version':c.version,'type':c.contract_type,'title':c.title,'body':c.body,'merchant_id':c.merchant_id,'affiliate_id':c.affiliate_id,'commission_rate':str(c.commission_rate) if c.commission_rate is not None else None,'commission_scope':c.commission_scope,'penalty_terms':c.penalty_terms,'penalty_type':c.penalty_type,'penalty_amount':str(c.penalty_amount) if c.penalty_amount is not None else None,'penalty_percent':str(c.penalty_percent) if c.penalty_percent is not None else None,'termination_terms':c.termination_terms,'legal_entity_name':c.legal_entity_name,'starts_at':str(c.starts_at),'ends_at':str(c.ends_at)},ensure_ascii=False,sort_keys=True)
     digest=hashlib.sha256(snapshot.encode()).hexdigest()
     db.add(ContractAcceptance(contract_id=c.id,user_id=user.id,full_name=data.full_name.strip(),document_hash=digest,ip_address=(request.client.host if request.client else '')[:64],user_agent=request.headers.get('user-agent','')[:500]))
     contract_event(db,c,user,'party_accepted',{'name':data.full_name.strip(),'hash':digest})
@@ -418,12 +679,12 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     parties=''.join(f'<p>{a.full_name} — {a.accepted_at.isoformat()}</p>' for a in db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id)).all())
     safe=lambda x: str(x or '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
     html=f"""<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>{safe(c.contract_number)}</title>
-    <style>body{{font:16px Tahoma,Arial;line-height:2;margin:40px;color:#172338}}h1{{color:#147b91}}.sig{{display:inline-block;border:2px solid #147b91;padding:18px 32px;border-radius:12px;font:bold 26px Georgia;color:#147b91}}@media print{{button{{display:none}}}}</style>
+    <style>@page{{size:A4;margin:18mm}}body{{font:16px Tahoma,Arial;line-height:2;margin:0 auto;max-width:820px;padding:38px;color:#252a35;background:#fffdf7;border:8px double #b9974b;box-shadow:inset 0 0 0 2px #ead9ae}}h1{{color:#8d6a24;text-align:center;letter-spacing:2px;border-bottom:1px solid #d8c28c;padding-bottom:18px}}h2{{color:#34445a;text-align:center}}h3{{color:#8d6a24;border-bottom:1px solid #e6d9b7;padding-bottom:6px}}.sig{{display:inline-block;border:2px solid #b9974b;padding:18px 32px;border-radius:12px;font:bold 26px Georgia;color:#8d6a24;background:#fffaf0}}.meta{{background:#f7f0df;border:1px solid #dfcfaa;padding:12px 18px;border-radius:8px}}.ack{{margin-top:24px;padding:18px;border:1px solid #c7a65b;background:#fffaf0;white-space:pre-line}}@media print{{body{{box-shadow:none}}button{{display:none}}}}</style>
     <h1>WESLA | اتفاقية إلكترونية</h1><h2>{safe(c.title)}</h2><p>رقم العقد: {safe(c.contract_number)} | الإصدار: {c.version}</p>
     <p>الجهة المتعاقدة: {safe(c.legal_entity_name or 'الاسم القانوني للطرف المتعاقد')}</p><article>{safe(c.body).replace(chr(10),'<br>')}</article>
     <h3>العمولات</h3><p>{safe(c.commission_rate)}% — {safe(c.commission_scope)}</p><h3>الشروط الجزائية</h3><p>{safe(c.penalty_terms)}</p><p>{safe(c.termination_terms)}</p>
     <h3>موافقات الأطراف</h3>{parties}<h3>اعتماد المنصة</h3><div class="sig">WESLA</div><p>{safe(c.platform_signer_name)} — {safe(c.approved_at)}</p><p>بصمة النسخة: {safe(c.final_hash)}</p>
-    <p>هذا التوقيع والختم تمثيل بصري داخلي ولا يشكل تصديقًا حكوميًا أو توقيعًا إلكترونيًا معتمدًا.</p><button onclick="print()">طباعة / حفظ PDF</button></html>"""
+    <p class="meta">تُحفظ هذه النسخة بسجل الموافقات والبصمة الرقمية للأطراف، وتُقدَّر حجيتها وفقًا للقانون المصري والضوابط المنظمة للتوقيع الإلكتروني.</p><button onclick="print()">طباعة / حفظ PDF</button></html>"""
     return HTMLResponse(html)
 
 @app.post('/api/contracts/{contract_id}/termination')
@@ -481,6 +742,15 @@ def accept_commission_change(request_id:int,user:User=Depends(current_user),db:S
     x.status='accepted'; x.accepted_at=datetime.now(timezone.utc)
     db.commit(); return {'message':'تمت الموافقة وتفعيل النسبة الجديدة للعمليات القادمة فقط'}
 
+@app.get('/api/admin/negotiations')
+def admin_negotiations(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(ContractNegotiation).order_by(ContractNegotiation.created_at.desc()).limit(200)).all()
+    result=[]
+    for n in rows:
+        c=db.get(Contract,n.contract_id); proposer=db.get(User,n.proposer_id); recipient=db.get(User,n.recipient_id)
+        result.append({'id':n.id,'contract_number':c.contract_number if c else '', 'contract_title':c.title if c else '', 'proposer':proposer.name if proposer else '', 'recipient':recipient.name if recipient else '', 'proposal_text':n.proposal_text,'reason':n.reason,'response_text':n.response_text,'status':n.status,'created_at':n.created_at.isoformat()})
+    return result
+
 @app.get('/api/admin/contracts')
 def admin_contracts(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     return [contract_out(c,db) for c in db.scalars(select(Contract).order_by(Contract.created_at.desc())).all()]
@@ -494,7 +764,7 @@ def create_contract(data:ContractIn,user:User=Depends(require_role('admin')),db:
     if data.contract_type in ('platform_affiliate','merchant_affiliate'):
         if not data.affiliate_id or not db.get(User,data.affiliate_id) or db.get(User,data.affiliate_id).role!='affiliate': raise HTTPException(400,'اختر حساب مسوق صحيح')
     if data.commission_scope not in ('contract','all_products','product'): raise HTTPException(400,'نطاق العمولة غير صحيح')
-    c=Contract(contract_type=data.contract_type,title=data.title.strip(),body=data.body,merchant_id=data.merchant_id,affiliate_id=data.affiliate_id,commission_rate=data.commission_rate,penalty_terms=data.penalty_terms,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),starts_at=data.starts_at,ends_at=data.ends_at,legal_entity_name=data.legal_entity_name,commission_scope=data.commission_scope,penalty_type=data.penalty_type,penalty_amount=data.penalty_amount,penalty_percent=data.penalty_percent,termination_terms=data.termination_terms,platform_signer_name='WESLA | المنصة')
+    c=Contract(contract_type=data.contract_type,title=data.title.strip(),body=ensure_contract_ack(data.body),merchant_id=data.merchant_id,affiliate_id=data.affiliate_id,commission_rate=data.commission_rate,penalty_terms=data.penalty_terms,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),starts_at=data.starts_at,ends_at=data.ends_at,legal_entity_name=data.legal_entity_name,commission_scope=data.commission_scope,penalty_type=data.penalty_type,penalty_amount=data.penalty_amount,penalty_percent=data.penalty_percent,termination_terms=data.termination_terms,platform_signer_name='WESLA | المنصة')
     db.add(c); db.flush(); contract_event(db,c,user,'created',{'number':c.contract_number})
     db.commit(); db.refresh(c); return contract_out(c,db)
 
