@@ -107,6 +107,36 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert terminated.status_code==200
     assert client.get('/api/admin/termination-requests').status_code==200
 
+    # A legacy unnumbered agreement with a prior acceptance must be reissued,
+    # not silently renumbered after the party has accepted it.
+    unnumbered=client.post('/api/admin/contracts',json={
+        'contract_type':'platform_merchant','title':'اتفاقية قديمة بلا رقم',
+        'body':'نص اتفاقية لاختبار إعادة الإصدار بعد الموافقة.',
+        'merchant_id':merchant_id,'commission_scope':'contract'
+    })
+    assert unnumbered.status_code==200, unnumbered.text
+    unnumbered_id=unnumbered.json()['id']
+    assert client.post(f'/api/admin/contracts/{unnumbered_id}/activate').status_code==200
+    unnumbered_db=SessionLocal()
+    try:
+        unnumbered_db.get(Contract,unnumbered_id).contract_number=None
+        unnumbered_db.commit()
+    finally:
+        unnumbered_db.close()
+    unnumbered_accept=merchant_client.post(f'/api/contracts/{unnumbered_id}/accept',json={
+        'full_name':'تاجر الاختبار','accepted':True
+    })
+    assert unnumbered_accept.status_code==200, unnumbered_accept.text
+    reissued=client.post(f'/api/admin/contracts/{unnumbered_id}/reissue-numbered')
+    assert reissued.status_code==200, reissued.text
+    assert reissued.json()['status']=='draft' and reissued.json()['contract_number'].startswith('WS-')
+    reissue_db=SessionLocal()
+    try:
+        assert reissue_db.get(Contract,unnumbered_id).status=='archived'
+        assert len(reissue_db.scalars(select(Contract).where(Contract.id==reissued.json()['contract_id'])).all())==1
+    finally:
+        reissue_db.close()
+
     # Public contact settings, merchant store page, and product share URL.
     contact=merchant_client.patch('/api/me/contact',json={
         'contact_phone':'01012345678','contact_whatsapp':'201012345678','contact_public':True
