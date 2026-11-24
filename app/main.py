@@ -43,6 +43,8 @@ def product_out(p,db):
     return {'id':p.id,'title':p.title,'description':p.description,'price':p.price,'stock':p.stock,'affiliate_rate':p.affiliate_rate,'platform_rate':p.platform_rate,'status':p.status,'merchant':merchant.name if merchant else ''}
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
+class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
+class AdminPasswordChange(BaseModel): current_password:str; new_password:str=Field(min_length=10,max_length=128)
 class ApplicationIn(BaseModel): role:str; details:str=''
 class ProductIn(BaseModel): title:str=Field(min_length=2,max_length=180); description:str=''; price:float=Field(gt=0); stock:int=Field(ge=0); affiliate_rate:float=Field(ge=0,le=80); platform_rate:float=Field(ge=0,le=30)
 class OrderIn(BaseModel): product_id:int; quantity:int=Field(ge=1,le=20); customer_name:str; customer_phone:str; address:str; referral_code:str|None=None
@@ -70,6 +72,31 @@ def login(data:LoginIn,response:Response,db:Session=Depends(get_db)):
     token=secrets.token_urlsafe(32); db.add(AuthSession(token_hash=hashlib.sha256(token.encode()).hexdigest(),user_id=u.id,expires_at=datetime.now(timezone.utc)+timedelta(days=7))); db.commit()
     response.set_cookie('wesla_session',token,httponly=True,samesite='lax',secure=os.getenv('COOKIE_SECURE','0')=='1',max_age=60*60*24*7)
     return {'user':public_user(u)}
+@app.post('/api/admin/password-login')
+def admin_password_login(data:AdminPasswordLogin,response:Response,db:Session=Depends(get_db)):
+    admins=db.scalars(select(User).where(User.role=='admin',User.status=='active').order_by(User.id.asc())).all()
+    admin=next((u for u in admins if verify_password(data.password,u.password_hash)),None)
+    if not admin: raise HTTPException(401,'كلمة مرور الإدارة غير صحيحة')
+    token=secrets.token_urlsafe(32)
+    db.add(AuthSession(token_hash=hashlib.sha256(token.encode()).hexdigest(),user_id=admin.id,expires_at=datetime.now(timezone.utc)+timedelta(hours=12)))
+    db.commit()
+    response.set_cookie('wesla_session',token,httponly=True,samesite='lax',secure=os.getenv('COOKIE_SECURE','0')=='1',max_age=60*60*12)
+    return {'user':public_user(admin)}
+
+@app.post('/api/admin/change-password')
+def admin_change_password(data:AdminPasswordChange,request:Request,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    if not verify_password(data.current_password,user.password_hash):
+        raise HTTPException(401,'كلمة المرور الحالية غير صحيحة')
+    user.password_hash=hash_password(data.new_password)
+    token=request.cookies.get('wesla_session')
+    current_hash=hashlib.sha256(token.encode()).hexdigest() if token else None
+    sessions=db.scalars(select(AuthSession).where(AuthSession.user_id==user.id)).all()
+    for session in sessions:
+        if session.token_hash!=current_hash:
+            db.delete(session)
+    db.commit()
+    return {'message':'تم تغيير كلمة مرور الإدارة بنجاح'}
+
 @app.post('/api/logout')
 def logout(response:Response,request:Request,db:Session=Depends(get_db)):
     token=request.cookies.get('wesla_session')
