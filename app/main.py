@@ -74,16 +74,8 @@ class PayoutIn(BaseModel): amount:float=Field(gt=0); method:str; destination:str
 @app.get('/')
 def home(): return FileResponse('app/static/index.html')
 @app.get('/control')
-def control_page(request:Request,db:Session=Depends(get_db)):
-    token=request.cookies.get('wesla_session')
-    if token:
-        token_hash=hashlib.sha256(token.encode()).hexdigest()
-        session=db.scalar(select(AuthSession).where(AuthSession.token_hash==token_hash))
-        if session:
-            expires=session.expires_at.replace(tzinfo=timezone.utc) if session.expires_at.tzinfo is None else session.expires_at
-            account=db.get(User,session.user_id)
-            if expires>=datetime.now(timezone.utc) and account and account.status=='active' and account.role!='admin':
-                return RedirectResponse(url='/',status_code=303)
+def control_page():
+    # The console authenticates via admin-only APIs; never redirect users to public home.
     return FileResponse('app/static/control.html')
 
 @app.get('/health')
