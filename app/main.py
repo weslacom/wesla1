@@ -1014,6 +1014,38 @@ def create_contract(data:ContractIn,user:User=Depends(require_role('admin')),db:
     db.add(c); db.flush(); contract_event(db,c,user,'created',{'number':c.contract_number})
     db.commit(); db.refresh(c); return contract_out(c,db)
 
+@app.post('/api/admin/contracts/{contract_id}/reissue-numbered')
+def reissue_unnumbered_contract(contract_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    c=db.get(Contract,contract_id)
+    if not c or c.status not in ('draft','active'): raise HTTPException(404,'الاتفاقية غير متاحة لإعادة الإصدار')
+    if c.contract_number: raise HTTPException(409,'الاتفاقية لديها رقم بالفعل')
+    acceptances=db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id)).all()
+    new_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper()
+    if not acceptances:
+        c.contract_number=new_number
+        contract_event(db,c,user,'contract_number_assigned',{'contract_number':new_number,'reason':'Assigned before any party acceptance.'})
+        db.commit()
+        return {'message':'تم تخصيص رقم رسمي للاتفاقية دون تغيير نصها؛ لم تكن هناك موافقات سابقة.','contract_id':c.id,'contract_number':new_number,'status':c.status}
+    if c.status!='active':
+        raise HTTPException(409,'لا يمكن إعادة إصدار نسخة سبق إقفالها إلا بعد مراجعة حالتها أولًا')
+    revised=Contract(
+        contract_type=c.contract_type,title=c.title,body=c.body,merchant_id=c.merchant_id,affiliate_id=c.affiliate_id,
+        commission_rate=c.commission_rate,penalty_terms=c.penalty_terms,status='draft',contract_number=new_number,
+        starts_at=c.starts_at,ends_at=c.ends_at,version=(c.version or 1)+1,
+        platform_signer_name=c.platform_signer_name,legal_entity_name=c.legal_entity_name,
+        commission_scope=c.commission_scope,penalty_type=c.penalty_type,penalty_amount=c.penalty_amount,
+        penalty_percent=c.penalty_percent,termination_terms=c.termination_terms,
+    )
+    db.add(revised)
+    db.flush()
+    c.status='archived'
+    contract_event(db,c,user,'reissued_as_numbered_version',{'new_contract_id':revised.id,'new_contract_number':new_number,'old_acceptances_preserved':len(acceptances)})
+    contract_event(db,revised,user,'reissued_from_legacy_contract',{'source_contract_id':c.id,'source_contract_number':None})
+    db.commit()
+    db.refresh(revised)
+    return {'message':'أُنشئت نسخة جديدة مرقمة كمسودة. أُرشفت النسخة القديمة مع الاحتفاظ بموافقاتها وسجلها، ويجب إعادة إرسال النسخة الجديدة للأطراف.','contract_id':revised.id,'contract_number':new_number,'status':revised.status}
+
+
 @app.post('/api/admin/contracts/{contract_id}/reopen-for-platform-approval')
 def reopen_legacy_platform_contract(contract_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     c=db.get(Contract,contract_id)
