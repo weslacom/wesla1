@@ -56,7 +56,7 @@ def set_session_cookie(response:Response,token:str,max_age:int):
 def health(db:Session=Depends(get_db)):
     # Readiness probe: confirm the application process and PostgreSQL are both responsive.
     db.execute(text('select 1'))
-    return {'status':'ok','database':'ok'}
+    return {'ok':True,'status':'ok','database':'ok'}
 
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 
