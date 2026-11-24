@@ -818,7 +818,7 @@ def accept_contract(contract_id:int,data:ContractDecision,request:Request,user:U
 def contract_document(contract_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
     c=db.get(Contract,contract_id)
     if not c or not can_view_contract(c,user): raise HTTPException(404,'العقد غير موجود')
-    if c.status!='signed': raise HTTPException(409,'لا تتوفر نسخة نهائية قبل اكتمال التوقيعات')
+    if c.status not in ('signed','termination_review','terminated'): raise HTTPException(409,'لا تتوفر نسخة نهائية قبل اكتمال التوقيعات')
     from fastapi.responses import HTMLResponse
     safe=lambda x: str(x or '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;').replace("'","&#39;")
     acceptances=db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id).order_by(ContractAcceptance.accepted_at)).all()
