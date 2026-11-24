@@ -254,6 +254,8 @@ def update_product_variants(product_id:int,variants:list[VariantIn],user:User=De
     for v in existing:
         if v.id not in keep: v.stock=0
     p.has_variants=bool(variants); p.stock=sum(v.stock for v in db.scalars(select(ProductVariant).where(ProductVariant.product_id==p.id)).all())
+    # Restore sold-out products automatically when the merchant adds stock again.
+    p.status='active' if p.stock>0 else 'sold_out'
     db.commit(); return product_out(p,db)
 
 @app.get('/api/merchant/products/{product_id}')
@@ -392,6 +394,9 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
     if variant: variant.stock-=data.quantity
     p.stock-=data.quantity
+    # Hide the product from all public catalogues as soon as its total stock reaches zero.
+    # Keep the product/order history in the database; it can be republished by restocking.
+    if p.stock<=0: p.status='sold_out'
     db.add(order); db.commit(); db.refresh(order)
     return {'order_number':order.order_number,'status':order.status,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
 @app.get('/api/affiliate/links')
