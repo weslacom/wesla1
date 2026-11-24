@@ -77,9 +77,17 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
         'full_name':'تاجر الاختبار','accepted':True
     })
     assert accepted.status_code==200
+    assert accepted.json()['status']=='active'
+    admin_approved=client.post(f"/api/admin/contracts/{contract['id']}/approve",json={'accepted':True})
+    assert admin_approved.status_code==200, admin_approved.text
+    assert admin_approved.json()['status']=='signed'
     printable=merchant_client.get(f"/api/contracts/{contract['id']}/document")
     assert printable.status_code==200, printable.text
     assert 'طباعة / حفظ PDF' in printable.text
+    assert 'سجل الموافقات الإلكترونية والأطراف' in printable.text
+    assert 'بصمة موافقة الإدارة SHA-256' in printable.text
+    assert 'لا يُعد بذاته شهادة تصديق إلكتروني' in printable.text
+    assert 'Aref Ruqaa' not in printable.text
     terminated=merchant_client.post(f"/api/contracts/{contract['id']}/termination",json={
         'reason':'طلب اختبار لمسار فسخ الاتفاقية.',
         'evidence_paths':['evidence/test-document.pdf']
