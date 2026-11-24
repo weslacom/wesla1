@@ -19,6 +19,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 admin_origins=[x.strip() for x in os.getenv('ADMIN_PORTAL_ORIGINS','').split(',') if x.strip()]
 if admin_origins:
     app.add_middleware(CORSMiddleware,allow_origins=admin_origins,allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Content-Type'])
+
+def set_session_cookie(response:Response,token:str,max_age:int):
+    # Cross-origin admin fetch requires SameSite=None; browsers require Secure with None.
+    cross_origin_admin=bool(admin_origins)
+    response.set_cookie('wesla_session',token,httponly=True,samesite='none' if cross_origin_admin else 'lax',secure=True if cross_origin_admin else os.getenv('COOKIE_SECURE','0')=='1',max_age=max_age)
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 
 # Passwords use PBKDF2; sessions are random opaque tokens stored only as hashes.
@@ -58,7 +63,7 @@ def products_out(rows,db):
     for im in db.scalars(select(ProductImage).where(ProductImage.product_id.in_(product_ids)).order_by(ProductImage.product_id,ProductImage.is_primary.desc(),ProductImage.id)).all():
         images_by[im.product_id].append(im)
     guides_by={pid:[] for pid in product_ids}
-    for g in db.scalars(select(ProductSizeGuide).where(ProductSizeGuide.product_id.in_(product_ids))).all():
+    for g in db.scalars(select(ProductSizeGuide).where(ProductSizeGuide.product_id.in_(product_ids))).all():  # .all() belongs to ScalarResult, not Select
         guides_by[g.product_id].append(g)
     result=[]
     for p in rows:
@@ -136,7 +141,7 @@ def login(data:LoginIn,response:Response,db:Session=Depends(get_db)):
     if not u or not verify_password(data.password,u.password_hash): raise HTTPException(401,'بيانات الدخول غير صحيحة')
     if u.status!='active': raise HTTPException(403,'الحساب غير نشط')
     token=secrets.token_urlsafe(32); db.add(AuthSession(token_hash=hashlib.sha256(token.encode()).hexdigest(),user_id=u.id,expires_at=datetime.now(timezone.utc)+timedelta(days=7))); db.commit()
-    response.set_cookie('wesla_session',token,httponly=True,samesite='lax',secure=os.getenv('COOKIE_SECURE','0')=='1',max_age=60*60*24*7)
+    set_session_cookie(response,token,60*60*24*7)
     return {'user':public_user(u)}
 @app.post('/api/admin/password-login')
 def admin_password_login(data:AdminPasswordLogin,response:Response,db:Session=Depends(get_db)):
@@ -146,7 +151,7 @@ def admin_password_login(data:AdminPasswordLogin,response:Response,db:Session=De
     token=secrets.token_urlsafe(32)
     db.add(AuthSession(token_hash=hashlib.sha256(token.encode()).hexdigest(),user_id=admin.id,expires_at=datetime.now(timezone.utc)+timedelta(hours=12)))
     db.commit()
-    response.set_cookie('wesla_session',token,httponly=True,samesite='lax',secure=os.getenv('COOKIE_SECURE','0')=='1',max_age=60*60*12)
+    set_session_cookie(response,token,60*60*12)
     return {'user':public_user(admin)}
 
 @app.post('/api/admin/change-password')
@@ -323,9 +328,11 @@ def admin_restore_product(product_id:int,user:User=Depends(require_role('admin')
 def admin_products(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.scalars(select(Product).order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
     items=products_out(rows,db)
+    product_by_id={p.id:p for p in rows}
     for item in items:
-        item['deleted_at']=next((p.deleted_at.isoformat() for p in rows if p.id==item['id'] and p.deleted_at),None)
-        item['deleted_by_role']=next((p.deleted_by_role for p in rows if p.id==item['id']),None)
+        product=product_by_id[item['id']]
+        item['deleted_at']=product.deleted_at.isoformat() if product.deleted_at else None
+        item['deleted_by_role']=product.deleted_by_role
     return items
 
 @app.delete('/api/affiliate/products/{product_id}')
@@ -619,10 +626,10 @@ def respond_contract_negotiation(negotiation_id:int,data:ContractNegotiationResp
     elif data.decision=='accept':
         original=db.get(Contract,row.contract_id)
         next_version=original.version+1
-        number=f'{original.contract_number}-V{next_version}'
         revised_body=ensure_contract_ack(original.body+chr(10)+chr(10)+'بند مضاف نتيجة التفاوض'+chr(10)+row.proposal_text)
-        revised=Contract(contract_type=original.contract_type,title=f'{original.title} — الإصدار {next_version}',body=revised_body,merchant_id=original.merchant_id,affiliate_id=original.affiliate_id,commission_rate=original.commission_rate,penalty_terms=original.penalty_terms,status='draft',contract_number=number,starts_at=original.starts_at,ends_at=original.ends_at,version=next_version,platform_signer_name=original.platform_signer_name,legal_entity_name=original.legal_entity_name,commission_scope=original.commission_scope,penalty_type=original.penalty_type,penalty_amount=original.penalty_amount,penalty_percent=original.penalty_percent,termination_terms=original.termination_terms)
+        revised=Contract(contract_type=original.contract_type,title=f'{original.title} — الإصدار {next_version}',body=revised_body,merchant_id=original.merchant_id,affiliate_id=original.affiliate_id,commission_rate=original.commission_rate,penalty_terms=original.penalty_terms,status='draft',contract_number=None,starts_at=original.starts_at,ends_at=original.ends_at,version=next_version,platform_signer_name=original.platform_signer_name,legal_entity_name=original.legal_entity_name,commission_scope=original.commission_scope,penalty_type=original.penalty_type,penalty_amount=original.penalty_amount,penalty_percent=original.penalty_percent,termination_terms=original.termination_terms)
         db.add(revised); db.flush(); new_contract_id=revised.id
+        revised.contract_number=f'W-{revised.id}-V{next_version}'
         contract_event(db,original,user,'negotiation_accepted_new_version',{'negotiation_id':row.id,'new_contract_id':new_contract_id,'version':next_version})
         contract_event(db,revised,user,'created_from_negotiation',{'source_contract_id':original.id,'negotiation_id':row.id})
         for party_id in contract_party_ids(original): notify_user(db,party_id,'تم قبول مقترح التفاوض','تم إنشاء إصدار جديد كمسودة، ويجب على الأطراف مراجعته وتوقيعه من جديد','/')
