@@ -349,7 +349,7 @@ def contract_out(c,db):
       'approved_at':c.approved_at.isoformat() if c.approved_at else None,'platform_signer_name':c.platform_signer_name,
       'final_hash':c.final_hash,'status':c.status,'created_at':c.created_at.isoformat(),
       'acceptances':[{'user_id':a.user_id,'full_name':a.full_name,'accepted_at':a.accepted_at.isoformat(),'document_hash':a.document_hash} for a in accepts],
-      'events':[{'event':e.event_type,'details':json.loads(e.details or '{}'),'created_at':e.created_at.isoformat()} for e in events]}
+      'events':[{'event':e.event_type,'details':e.details if isinstance(e.details,dict) else (json.loads(e.details) if isinstance(e.details,str) and e.details else {}),'created_at':e.created_at.isoformat()} for e in events]}
 
 @app.get('/api/contracts/my')
 def my_contracts(user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -406,7 +406,7 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
 def request_termination(contract_id:int,data:TerminationIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     c=db.get(Contract,contract_id)
     if not c or not can_view_contract(c,user) or c.status!='signed': raise HTTPException(404,'العقد غير متاح لطلب الفسخ')
-    req=ContractTerminationRequest(contract_id=c.id,requester_user_id=user.id,reason=data.reason,evidence_paths=json.dumps(data.evidence_paths))
+    req=ContractTerminationRequest(contract_id=c.id,requester_user_id=user.id,reason=data.reason,evidence_paths=data.evidence_paths)
     db.add(req); c.status='termination_review'; contract_event(db,c,user,'termination_requested',{'reason':data.reason})
     db.commit(); return {'message':'تم تسجيل طلب الفسخ وإرساله للمراجعة'}
 
