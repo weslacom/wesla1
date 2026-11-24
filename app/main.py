@@ -162,13 +162,16 @@ class ContractNegotiationResponseIn(BaseModel):
     response_text:str=Field(default='',max_length=5000)
 
 @app.get('/')
-def home(): return FileResponse('app/static/index.html',headers={'Cache-Control':'public, max-age=60, stale-while-revalidate=300'})
+def home():
+    # Never cache the public shell: an older cached bundle could redirect admins to /control.
+    return FileResponse('app/static/index.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 @app.get('/control')
 def control_page():
-    # Once the independent admin portal is deployed, keep its assets off the public site.
+    # The admin portal is reachable only through its dedicated route, never from the public home page.
     admin_url=os.getenv('ADMIN_PORTAL_URL','').strip()
-    if admin_url: return RedirectResponse(admin_url,status_code=307)
-    return FileResponse('app/static/control.html')
+    if admin_url:
+        return RedirectResponse(admin_url,status_code=307,headers={'Cache-Control':'no-store'})
+    return FileResponse('app/static/control.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 
 @app.get('/health')
 def health(): return {'ok':True,'service':'wesla'}
