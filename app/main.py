@@ -8,12 +8,38 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from .database import Base, engine, get_db, SessionLocal
 from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification
 
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
+
+@app.on_event('startup')
+def cleanup_temporary_data_every_15_days():
+    # There is no Redis/in-memory cache in this application. Clean only expired
+    # login sessions and already-read notifications; never delete orders/products.
+    if engine.dialect.name != 'postgresql':
+        return
+    db=SessionLocal()
+    try:
+        last=db.execute(text("select value from site_settings where key='last_temporary_data_cleanup'")).scalar()
+        now_utc=datetime.now(timezone.utc)
+        if last:
+            try:
+                last_at=datetime.fromisoformat(str(last).replace('Z','+00:00'))
+                if last_at.tzinfo is None: last_at=last_at.replace(tzinfo=timezone.utc)
+                if now_utc-last_at < timedelta(days=15): return
+            except (TypeError,ValueError):
+                pass
+        db.execute(text("delete from auth_sessions where expires_at < now()"))
+        db.execute(text("delete from notifications where read_at is not null and read_at < now() - interval '15 days'"))
+        db.execute(text("insert into site_settings(key,value,updated_at) values ('last_temporary_data_cleanup',:value,now()) on conflict(key) do update set value=excluded.value,updated_at=now()"),{'value':now_utc.isoformat()})
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 # Compress JSON and HTML responses to reduce bandwidth for mobile visitors.
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 admin_origins=[x.strip().rstrip('/') for x in os.getenv('ADMIN_PORTAL_ORIGINS','https://wesla-admin-production.up.railway.app').split(',') if x.strip()]
