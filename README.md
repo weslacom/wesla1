@@ -11,7 +11,7 @@ This is a working full-stack MVP, not a static mockup. It includes a FastAPI bac
 5. `uvicorn app.main:app --host 0.0.0.0 --port 8000`
 6. Open http://localhost:8000. API docs: http://localhost:8000/docs.
 
-The SQLite database file `wesla.db` is created in the project directory. Back it up. To deploy with PostgreSQL, configure `DATABASE_URL` and install a PostgreSQL driver (e.g. `psycopg[binary]`) before deployment. Set `COOKIE_SECURE=1` behind HTTPS.
+The application package is stored under `app/`. Configure `DATABASE_URL` for PostgreSQL in production. Set `COOKIE_SECURE=1` behind HTTPS. Set `COOKIE_SECURE=1` behind HTTPS.
 
 ## Important business constraints
 

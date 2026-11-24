@@ -1,0 +1,26 @@
+stages:
+  - test
+  - deploy
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+test:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - pip install --no-cache-dir -r requirements.txt
+  script:
+    - PYTHONPATH="$CI_PROJECT_DIR" pytest -q
+
+deploy_railway:
+  stage: deploy
+  image: ghcr.io/railwayapp/cli:latest
+  needs:
+    - test
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $RAILWAY_TOKEN'
+  script:
+    - railway up --ci --service wesla-web --environment production --project 69e0dcfe-0810-4896-a52b-588fb0eae063
