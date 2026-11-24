@@ -52,6 +52,12 @@ def set_session_cookie(response:Response,token:str,max_age:int):
     # Cross-origin admin fetch requires SameSite=None; browsers require Secure with None.
     cross_origin_admin=bool(admin_origins)
     response.set_cookie('wesla_session',token,httponly=True,samesite='none' if cross_origin_admin else 'lax',secure=True if cross_origin_admin else os.getenv('COOKIE_SECURE','0')=='1',max_age=max_age)
+@app.get('/health')
+def health(db:Session=Depends(get_db)):
+    # Readiness probe: confirm the application process and PostgreSQL are both responsive.
+    db.execute(text('select 1'))
+    return {'status':'ok','database':'ok'}
+
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 
 # Passwords use PBKDF2; sessions are random opaque tokens stored only as hashes.
