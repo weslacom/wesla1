@@ -116,7 +116,22 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
         'decision':'accept','response_text':'مقبول'
     })
     assert accepted_proposal.status_code==200, accepted_proposal.text
-    assert accepted_proposal.json()['new_contract_id']
+    first_revision_id=accepted_proposal.json()['new_contract_id']
+    assert first_revision_id
+    # Two accepted proposals against the same original version must not collide on unique contract_number.
+    second_proposal=merchant_client.post(f'/api/contracts/{new_contract_id}/negotiations',json={
+        'proposal_text':'تضاف آلية مراجعة دورية للعمولات كل ثلاثة أشهر.',
+        'reason':'تنظيم مراجعة العمولة.'
+    })
+    assert second_proposal.status_code==200, second_proposal.text
+    second_response=client.post(f"/api/contract-negotiations/{second_proposal.json()['negotiation_id']}/respond",json={
+        'decision':'accept','response_text':'مقبول'
+    })
+    assert second_response.status_code==200, second_response.text
+    second_revision_id=second_response.json()['new_contract_id']
+    assert second_revision_id and second_revision_id!=first_revision_id
+    revisions=db.scalars(select(Contract).where(Contract.id.in_([first_revision_id,second_revision_id]))).all()
+    assert len(revisions)==2 and len({c.contract_number for c in revisions})==2
     assert merchant_client.get('/api/contracts/negotiations/my').status_code==200
     assert merchant_client.get('/api/notifications/my').status_code==200
 
@@ -161,6 +176,9 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert client.get(f'/marketer/{affiliate_id}').status_code==200
     from app.admin_portal import app as admin_portal_app
     admin_portal_client=TestClient(admin_portal_app)
-    assert admin_portal_client.get('/').status_code==200
+    portal_html=admin_portal_client.get('/')
+    assert portal_html.status_code==200
+    assert "API_BASE_RAW=window.WESLA_API_BASE||''" in portal_html.text
+    assert 'wesla-web-production.up.railway.app' not in portal_html.text
     assert admin_portal_client.get('/health').json()['service']=='wesla-admin-portal'
 
