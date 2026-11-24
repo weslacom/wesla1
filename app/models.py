@@ -251,3 +251,19 @@ class Notification(Base):
     target_url: Mapped[str]=mapped_column(String(500), default='')
     read_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+
+class Announcement(Base):
+    __tablename__='announcements'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    title: Mapped[str]=mapped_column(String(180))
+    body: Mapped[str]=mapped_column(Text, default='')
+    audience: Mapped[str]=mapped_column(String(20), default='all', index=True)
+    target_url: Mapped[str]=mapped_column(String(500), default='')
+    button_label: Mapped[str]=mapped_column(String(60), default='')
+    is_active: Mapped[bool]=mapped_column(Boolean, default=True, index=True)
+    starts_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[int|None]=mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)

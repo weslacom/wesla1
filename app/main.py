@@ -5,12 +5,11 @@ from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text
 from .database import Base, engine, get_db, SessionLocal
-from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification
+from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement
 
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
@@ -42,16 +41,10 @@ def cleanup_temporary_data_every_15_days():
         db.close()
 # Compress JSON and HTML responses to reduce bandwidth for mobile visitors.
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
-admin_origins=list(dict.fromkeys(['https://wesla-admin-production.up.railway.app']+[x.strip().rstrip('/') for x in os.getenv('ADMIN_PORTAL_ORIGINS','').split(',') if x.strip()]))
-# The admin page is served from this same origin by default. Enable CORS only when
-# an explicitly configured external admin origin is intentionally used.
-if admin_origins:
-    app.add_middleware(CORSMiddleware,allow_origins=admin_origins,allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Content-Type'])
-
+# Administration is hosted on the main Wesla origin at /control.
+# This keeps browser requests and the authentication cookie same-origin.
 def set_session_cookie(response:Response,token:str,max_age:int):
-    # Cross-origin admin fetch requires SameSite=None; browsers require Secure with None.
-    cross_origin_admin=bool(admin_origins)
-    response.set_cookie('wesla_session',token,httponly=True,samesite='none' if cross_origin_admin else 'lax',secure=True if cross_origin_admin else os.getenv('COOKIE_SECURE','0')=='1',max_age=max_age)
+    response.set_cookie('wesla_session',token,httponly=True,samesite='lax',secure=os.getenv('COOKIE_SECURE','1')=='1',max_age=max_age)
 @app.get('/health')
 def health(db:Session=Depends(get_db)):
     # Readiness probe: confirm the application process and PostgreSQL are both responsive.
@@ -130,6 +123,23 @@ class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
 class AdminPasswordChange(BaseModel): current_password:str; new_password:str=Field(min_length=10,max_length=128)
+class AnnouncementCreateIn(BaseModel):
+    title:str=Field(min_length=3,max_length=180)
+    body:str=Field(default='',max_length=5000)
+    audience:str='all'
+    target_url:str=Field(default='',max_length=500)
+    button_label:str=Field(default='',max_length=60)
+    starts_at:datetime|None=None
+    ends_at:datetime|None=None
+class AnnouncementUpdateIn(BaseModel):
+    is_active:bool|None=None
+    title:str|None=Field(default=None,min_length=3,max_length=180)
+    body:str|None=Field(default=None,max_length=5000)
+    audience:str|None=None
+    target_url:str|None=Field(default=None,max_length=500)
+    button_label:str|None=Field(default=None,max_length=60)
+    starts_at:datetime|None=None
+    ends_at:datetime|None=None
 class ApplicationIn(BaseModel): role:str; details:str=''
 class VariantIn(BaseModel):
     id:int|None=None
@@ -181,10 +191,8 @@ def home():
     return FileResponse('app/static/index.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 @app.get('/control')
 def control_page():
-    # The admin portal is reachable only through its dedicated route, never from the public home page.
-    admin_url=os.getenv('ADMIN_PORTAL_URL','').strip()
-    if admin_url:
-        return RedirectResponse(admin_url,status_code=307,headers={'Cache-Control':'no-store'})
+    # Serve the administration UI directly from the main origin. Never redirect
+    # to the legacy second service: doing so reintroduces cross-origin fetch/cookie failures.
     return FileResponse('app/static/control.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 
 @app.get('/health')
@@ -575,6 +583,75 @@ def admin_users(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(defaul
 def admin_overview(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     delivered=Order.status=='delivered'
     return {'users':db.scalar(select(func.count(User.id))),'products':db.scalar(select(func.count(Product.id)).where(Product.status!='deleted')),'orders':db.scalar(select(func.count(Order.id))),'sales':db.scalar(select(func.coalesce(func.sum(Order.total),0)).where(delivered)),'platform_commission':db.scalar(select(func.coalesce(func.sum(Order.platform_commission),0)).where(delivered)),'affiliate_commission':db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(delivered)),'delivered_orders':db.scalar(select(func.count(Order.id)).where(delivered)),'applications':db.scalar(select(func.count(Application.id)).where(Application.status=='pending')),'payouts':db.scalar(select(func.count(Payout.id)).where(Payout.status=='pending'))}
+
+def announcement_dict(a:Announcement):
+    return {'id':a.id,'title':a.title,'body':a.body,'audience':a.audience,'target_url':a.target_url,'button_label':a.button_label,'is_active':a.is_active,'starts_at':a.starts_at.isoformat() if a.starts_at else None,'ends_at':a.ends_at.isoformat() if a.ends_at else None,'created_at':a.created_at.isoformat() if a.created_at else None}
+
+@app.get('/api/announcements/active')
+def active_announcements(request:Request,db:Session=Depends(get_db)):
+    role='customer'
+    raw=request.cookies.get('wesla_session')
+    if raw:
+        token_hash=hashlib.sha256(raw.encode()).hexdigest()
+        session=db.scalar(select(AuthSession).where(AuthSession.token_hash==token_hash))
+        if session:
+            expiry=session.expires_at.replace(tzinfo=timezone.utc) if session.expires_at.tzinfo is None else session.expires_at
+            if expiry>=datetime.now(timezone.utc):
+                account=db.get(User,session.user_id)
+                if account and account.status=='active': role=account.role
+    now_utc=datetime.now(timezone.utc)
+    rows=db.scalars(select(Announcement).where(
+        Announcement.is_active.is_(True),
+        Announcement.audience.in_(['all',role]),
+        (Announcement.starts_at.is_(None)) | (Announcement.starts_at<=now_utc),
+        (Announcement.ends_at.is_(None)) | (Announcement.ends_at>=now_utc)
+    ).order_by(Announcement.created_at.desc()).limit(20)).all()
+    return [announcement_dict(a) for a in rows]
+
+@app.get('/api/admin/announcements')
+def admin_announcements(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Announcement).order_by(Announcement.created_at.desc()).limit(200)).all()
+    return [announcement_dict(a) for a in rows]
+
+@app.post('/api/admin/announcements')
+def create_announcement(data:AnnouncementCreateIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    if data.audience not in ('all','customer','merchant','affiliate'):
+        raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    target=data.target_url.strip()
+    if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
+        raise HTTPException(400,'رابط الإعلان يجب أن يكون رابطًا داخليًا أو HTTPS')
+    if data.starts_at and data.ends_at and data.ends_at<=data.starts_at:
+        raise HTTPException(400,'وقت انتهاء الإعلان يجب أن يكون بعد وقت بدايته')
+    row=Announcement(title=data.title.strip(),body=data.body.strip(),audience=data.audience,target_url=target,button_label=data.button_label.strip(),starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
+    db.add(row);db.commit();db.refresh(row)
+    return announcement_dict(row)
+
+@app.patch('/api/admin/announcements/{announcement_id}')
+def update_announcement(announcement_id:int,data:AnnouncementUpdateIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    row=db.get(Announcement,announcement_id)
+    if not row: raise HTTPException(404,'الإعلان غير موجود')
+    values=data.model_dump(exclude_unset=True)
+    if 'audience' in values and values['audience'] not in ('all','customer','merchant','affiliate'):
+        raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    if 'target_url' in values:
+        target=(values['target_url'] or '').strip()
+        if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
+            raise HTTPException(400,'رابط الإعلان يجب أن يكون رابطًا داخليًا أو HTTPS')
+        values['target_url']=target
+    for key,value in values.items(): setattr(row,key,value)
+    if row.starts_at and row.ends_at and row.ends_at<=row.starts_at:
+        raise HTTPException(400,'وقت انتهاء الإعلان يجب أن يكون بعد وقت بدايته')
+    row.updated_at=datetime.now(timezone.utc)
+    db.commit();db.refresh(row)
+    return announcement_dict(row)
+
+@app.delete('/api/admin/announcements/{announcement_id}')
+def deactivate_announcement(announcement_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    row=db.get(Announcement,announcement_id)
+    if not row: raise HTTPException(404,'الإعلان غير موجود')
+    row.is_active=False;row.updated_at=datetime.now(timezone.utc)
+    db.commit()
+    return {'message':'تم إيقاف الإعلان مع الاحتفاظ بسجله'}
 @app.get('/api/admin/applications')
 def admin_applications(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(select(Application,User).join(User,User.id==Application.user_id).where(Application.status=='pending').order_by(Application.created_at.desc()).limit(200)).all()

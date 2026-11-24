@@ -23,20 +23,23 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'id="loginForm"' in admin_page.text
     assert 'وِصلة | منصة التسويق بالعمولة' not in admin_page.text
     assert 'no-store' in admin_page.headers.get('cache-control','')
-    # The separate admin portal must use its same-origin proxy; it must not call the API cross-origin.
-    assert "API_BASE_RAW=window.WESLA_API_BASE||''" in admin_page.text
-    assert 'wesla-web-production.up.railway.app' not in admin_page.text
-    preflight=client.options('/api/admin/overview',headers={'Origin':'https://wesla-admin-production.up.railway.app','Access-Control-Request-Method':'GET','Access-Control-Request-Headers':'content-type'})
-    assert preflight.status_code==200
-    assert preflight.headers.get('access-control-allow-origin')=='https://wesla-admin-production.up.railway.app'
-    assert preflight.headers.get('access-control-allow-credentials')=='true'
-    admin_login=client.post('/api/admin/password-login',json={'password':'StrongPassword123!'},headers={'Origin':'https://wesla-admin-production.up.railway.app'})
+    # The admin UI must remain on the main origin even if the legacy portal URL is configured.
+    assert 'API_BASE_RAW' not in admin_page.text
+    assert 'wesla-admin-production.up.railway.app' not in admin_page.text
+    assert 'async async function' not in public_home.text
+    admin_login=client.post('/api/admin/password-login',json={'password':'StrongPassword123!'})
     assert admin_login.status_code==200
     admin_cookie=admin_login.headers.get('set-cookie','').lower()
-    assert 'samesite=none' in admin_cookie and 'secure' in admin_cookie
+    assert 'samesite=lax' in admin_cookie and 'secure' in admin_cookie
     cookie_pair=admin_login.headers.get('set-cookie','').split(';',1)[0]
     overview_response=client.get('/api/admin/overview',headers={'Cookie':cookie_pair})
     assert overview_response.status_code==200, overview_response.text
+    announcement=client.post('/api/admin/announcements',json={'title':'إعلان اختبار','body':'رسالة لكل مستخدمي وصلة','audience':'all'})
+    assert announcement.status_code==200, announcement.text
+    assert client.get('/api/announcements/active').json()[0]['title']=='إعلان اختبار'
+    assert client.get('/api/admin/announcements').status_code==200
+    assert client.delete('/api/admin/announcements/'+str(announcement.json()['id'])).status_code==200
+    assert client.get('/api/announcements/active').json()==[]
     product=client.post('/api/merchant/products',json={'title':'اختبار','description':'منتج','price':125,'stock':4,'affiliate_rate':12,'platform_rate':5})
     assert product.status_code==200
     second_product=client.post('/api/merchant/products',json={'title':'اختبار ثانٍ','description':'منتج آخر','price':95,'stock':3,'affiliate_rate':10,'platform_rate':5})
