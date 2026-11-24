@@ -38,7 +38,7 @@ def admin_home():
     # API calls stay same-origin and are securely proxied by this service.
     html = html.replace(
         "<script>",
-        f"<script>window.WESLA_API_BASE='';window.WESLA_PUBLIC_URL={json.dumps(os.getenv('WESLA_PUBLIC_URL', 'https://wesla-web-production.up.railway.app').rstrip('/'))};",
+        f"<script>window.WESLA_API_BASE='';window.WESLA_PUBLIC_URL={json.dumps(os.getenv('WESLA_PUBLIC_URL', '').rstrip('/'))};",
         1,
     )
     return HTMLResponse(
