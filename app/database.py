@@ -11,7 +11,20 @@ elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+engine_options = {"connect_args": connect_args, "pool_pre_ping": True}
+if not DATABASE_URL.startswith("sqlite"):
+    # Keep the application pool bounded. Tune these via Railway variables only
+    # after checking the Supabase connection limit and the number of app replicas.
+    engine_options.update({
+        "pool_size": max(1, int(os.getenv("DB_POOL_SIZE", "5"))),
+        "max_overflow": max(0, int(os.getenv("DB_MAX_OVERFLOW", "5"))),
+        "pool_timeout": max(5, int(os.getenv("DB_POOL_TIMEOUT", "20"))),
+        "pool_recycle": max(300, int(os.getenv("DB_POOL_RECYCLE", "1800"))),
+        "pool_use_lifo": True,
+        "connect_args": {"connect_timeout": 10},
+    })
+
+engine = create_engine(DATABASE_URL, **engine_options)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
