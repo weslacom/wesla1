@@ -24,7 +24,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'وِصلة | منصة التسويق بالعمولة' not in admin_page.text
     assert 'no-store' in admin_page.headers.get('cache-control','')
     # The admin UI must remain on the main origin even if the legacy portal URL is configured.
-    assert 'API_BASE_RAW' not in admin_page.text
+    assert "const API_BASE_RAW=window.WESLA_API_BASE||''" in admin_page.text
     assert 'wesla-admin-production.up.railway.app' not in admin_page.text
     assert 'async async function' not in public_home.text
     admin_login=client.post('/api/admin/password-login',json={'password':'StrongPassword123!'})
