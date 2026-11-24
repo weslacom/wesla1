@@ -1014,6 +1014,32 @@ def create_contract(data:ContractIn,user:User=Depends(require_role('admin')),db:
     db.add(c); db.flush(); contract_event(db,c,user,'created',{'number':c.contract_number})
     db.commit(); db.refresh(c); return contract_out(c,db)
 
+@app.post('/api/admin/contracts/{contract_id}/reopen-for-platform-approval')
+def reopen_legacy_platform_contract(contract_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    c=db.get(Contract,contract_id)
+    if not c or c.status!='signed': raise HTTPException(404,'الاتفاقية غير متاحة لإعادة المراجعة')
+    if c.contract_type not in ('platform_merchant','platform_affiliate'):
+        raise HTTPException(409,'إعادة الاعتماد متاحة لاتفاقيات المنصة فقط')
+    acceptances=db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id)).all()
+    if any((db.get(User,a.user_id) and db.get(User,a.user_id).role=='admin') for a in acceptances):
+        raise HTTPException(409,'يوجد اعتماد مستقل مسجل من ممثل الإدارة بالفعل')
+    required=contract_party_ids(c)
+    if not required or not all(any(a.user_id==uid for a in acceptances) for uid in required):
+        raise HTTPException(409,'لا توجد موافقات مكتملة من الأطراف لإعادة فتح الاعتماد')
+    previous_hash=c.final_hash
+    previous_approved_at=c.approved_at.isoformat() if c.approved_at else None
+    c.status='active'
+    c.approved_at=None
+    c.final_hash=None
+    contract_event(db,c,user,'legacy_auto_approval_reopened',{
+        'reason':'Historical platform status had been marked signed without a separate administration acceptance record.',
+        'previous_final_hash':previous_hash,
+        'previous_approved_at':previous_approved_at,
+    })
+    db.commit()
+    return {'message':'أعيدت الاتفاقية إلى انتظار اعتماد ممثل الإدارة. تم الاحتفاظ بالبصمة التاريخية في سجل الأحداث.','status':c.status}
+
+
 @app.post('/api/admin/contracts/{contract_id}/approve')
 def approve_platform_contract(contract_id:int,data:AdminContractApproval,request:Request,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if not data.accepted: raise HTTPException(400,'يجب تأكيد اعتماد الإدارة')
