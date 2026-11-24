@@ -71,3 +71,83 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     })
     assert terminated.status_code==200
     assert client.get('/api/admin/termination-requests').status_code==200
+
+    # Public contact settings, merchant store page, and product share URL.
+    contact=merchant_client.patch('/api/me/contact',json={
+        'contact_phone':'01012345678','contact_whatsapp':'201012345678','contact_public':True
+    })
+    assert contact.status_code==200
+    merchant_product=merchant_client.post('/api/merchant/products',json={
+        'title':'منتج التاجر','description':'منتج لاختبار المتجر العام',
+        'price':250,'stock':5,'affiliate_rate':10,'platform_rate':5
+    })
+    assert merchant_product.status_code==200, merchant_product.text
+    product_id=merchant_product.json()['id']
+    store=client.get(f'/api/public/stores/{merchant_id}')
+    assert store.status_code==200 and store.json()['contact_phone']=='01012345678'
+    assert any(p['id']==product_id for p in store.json()['products'])
+    assert client.get(f'/p/{product_id}',follow_redirects=False).status_code==302
+
+    # Merchant can request a platform contract; admin approval creates a draft.
+    requested=merchant_client.post('/api/contracts/request',json={
+        'title':'طلب اتفاقية تاجر','details':'أرغب في اتفاقية تاجر مع منصة وصلة وفق الشروط المقترحة.',
+        'desired_commission':12
+    })
+    assert requested.status_code==200, requested.text
+    requests=client.get('/api/admin/contract-requests')
+    assert requests.status_code==200
+    request_id=requested.json()['request_id']
+    approved_request=client.post(f'/api/admin/contract-requests/{request_id}/decision',json={
+        'decision':'approve','admin_note':'تمت الموافقة المبدئية'
+    })
+    assert approved_request.status_code==200, approved_request.text
+    new_contract_id=approved_request.json()['contract_id']
+    activated=client.post(f'/api/admin/contracts/{new_contract_id}/activate')
+    assert activated.status_code==200
+
+    # A party can negotiate; acceptance creates a new draft version without changing the old agreement.
+    proposal=merchant_client.post(f'/api/contracts/{new_contract_id}/negotiations',json={
+        'proposal_text':'تضاف مهلة معالجة الشكوى خلال خمسة أيام عمل.',
+        'reason':'توضيح زمن الاستجابة لخدمة العملاء.'
+    })
+    assert proposal.status_code==200, proposal.text
+    negotiation_id=proposal.json()['negotiation_id']
+    accepted_proposal=client.post(f'/api/contract-negotiations/{negotiation_id}/respond',json={
+        'decision':'accept','response_text':'مقبول'
+    })
+    assert accepted_proposal.status_code==200, accepted_proposal.text
+    assert accepted_proposal.json()['new_contract_id']
+    assert merchant_client.get('/api/contracts/negotiations/my').status_code==200
+    assert merchant_client.get('/api/notifications/my').status_code==200
+
+    # Affiliate removal is personal to that marketer; it does not delete the merchant's product.
+    affiliate_client=TestClient(app)
+    affiliate_registration=affiliate_client.post('/api/register',json={
+        'name':'مسوق الاختبار','email':'affiliate@wesla.test','password':'AffiliatePass123!'
+    })
+    assert affiliate_registration.status_code==200
+    affiliate_id=affiliate_registration.json()['user']['id']
+    db=SessionLocal()
+    try:
+        db.get(User,affiliate_id).role='affiliate'
+        db.commit()
+    finally:
+        db.close()
+    assert affiliate_client.post('/api/login',json={
+        'email':'affiliate@wesla.test','password':'AffiliatePass123!'
+    }).status_code==200
+    available=affiliate_client.get('/api/affiliate/products')
+    assert any(p['id']==product_id for p in available.json())
+    hidden=affiliate_client.delete(f'/api/affiliate/products/{product_id}')
+    assert hidden.status_code==200
+    assert all(p['id']!=product_id for p in affiliate_client.get('/api/affiliate/products').json())
+    assert any(p['id']==product_id for p in client.get('/api/products').json())
+
+    # Merchant soft-delete preserves the row and admin can restore it.
+    deleted=merchant_client.delete(f'/api/merchant/products/{product_id}')
+    assert deleted.status_code==200, deleted.text
+    assert all(p['id']!=product_id for p in client.get('/api/products').json())
+    admin_restore=client.post(f'/api/admin/products/{product_id}/restore')
+    assert admin_restore.status_code==200, admin_restore.text
+    assert any(p['id']==product_id for p in client.get('/api/products').json())
+
