@@ -1,9 +1,10 @@
 import os, secrets, hashlib, hmac, json
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, Depends, HTTPException, Response, Request
+from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
@@ -12,6 +13,8 @@ from .models import User, Application, Product, Link, Order, Payout, AuthSession
 
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
+# Compress JSON and HTML responses to reduce bandwidth for mobile visitors.
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 
 # Passwords use PBKDF2; sessions are random opaque tokens stored only as hashes.
@@ -38,16 +41,33 @@ def require_role(*roles):
     return dep
 
 def public_user(u): return {'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status}
+def products_out(rows,db):
+    """Serialize a page of products with a fixed number of queries (not N+1 queries)."""
+    if not rows: return []
+    product_ids=[p.id for p in rows]
+    merchant_ids={p.merchant_id for p in rows}
+    merchants={u.id:u for u in db.scalars(select(User).where(User.id.in_(merchant_ids))).all()} if merchant_ids else {}
+    variants_by={pid:[] for pid in product_ids}
+    for v in db.scalars(select(ProductVariant).where(ProductVariant.product_id.in_(product_ids)).order_by(ProductVariant.product_id,ProductVariant.color,ProductVariant.size_label)).all():
+        variants_by[v.product_id].append(v)
+    images_by={pid:[] for pid in product_ids}
+    for im in db.scalars(select(ProductImage).where(ProductImage.product_id.in_(product_ids)).order_by(ProductImage.product_id,ProductImage.is_primary.desc(),ProductImage.id)).all():
+        images_by[im.product_id].append(im)
+    guides_by={pid:[] for pid in product_ids}
+    for g in db.scalars(select(ProductSizeGuide).where(ProductSizeGuide.product_id.in_(product_ids)).all()):
+        guides_by[g.product_id].append(g)
+    result=[]
+    for p in rows:
+        merchant=merchants.get(p.merchant_id)
+        result.append({'id':p.id,'title':p.title,'description':p.description,'price':p.price,'stock':p.stock,'affiliate_rate':p.affiliate_rate,'platform_rate':p.platform_rate,'status':p.status,'merchant':merchant.name if merchant else '',
+          'product_type':p.product_type,'size_system':p.size_system,'has_variants':p.has_variants,
+          'variants':[{'id':v.id,'color':v.color,'size':v.size_label,'size_system':v.size_system,'stock':v.stock,'price':v.price_override,'foot_length_cm':v.foot_length_cm} for v in variants_by[p.id]],
+          'images':[{'id':im.id,'path':im.storage_path,'primary':im.is_primary} for im in images_by[p.id]],
+          'size_guide':[{'label':g.label,'measurements':g.measurements if isinstance(g.measurements,dict) else json.loads(g.measurements or '{}')} for g in guides_by[p.id]]})
+    return result
+
 def product_out(p,db):
-    merchant=db.get(User,p.merchant_id)
-    variants=db.scalars(select(ProductVariant).where(ProductVariant.product_id==p.id).order_by(ProductVariant.color,ProductVariant.size_label)).all()
-    images=db.scalars(select(ProductImage).where(ProductImage.product_id==p.id)).all()
-    guide=db.scalars(select(ProductSizeGuide).where(ProductSizeGuide.product_id==p.id)).all()
-    return {'id':p.id,'title':p.title,'description':p.description,'price':p.price,'stock':p.stock,'affiliate_rate':p.affiliate_rate,'platform_rate':p.platform_rate,'status':p.status,'merchant':merchant.name if merchant else '',
-      'product_type':p.product_type,'size_system':p.size_system,'has_variants':p.has_variants,
-      'variants':[{'id':v.id,'color':v.color,'size':v.size_label,'size_system':v.size_system,'stock':v.stock,'price':v.price_override,'foot_length_cm':v.foot_length_cm} for v in variants],
-      'images':[{'id':im.id,'path':im.storage_path,'primary':im.is_primary} for im in images],
-      'size_guide':[{'label':g.label,'measurements':g.measurements if isinstance(g.measurements,dict) else json.loads(g.measurements or '{}')} for g in guide]}
+    return products_out([p],db)[0]
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
@@ -136,16 +156,15 @@ def apply(data:ApplicationIn,user:User=Depends(current_user),db:Session=Depends(
     if old: raise HTTPException(409,'لديك طلب قيد المراجعة بالفعل')
     a=Application(user_id=user.id,requested_role=data.role,details=data.details); db.add(a); db.commit(); return {'message':'تم إرسال طلبك للإدارة للمراجعة'}
 @app.get('/api/products')
-def products(db:Session=Depends(get_db)):
-    rows=db.scalars(select(Product).where(Product.status=='active').order_by(Product.created_at.desc())).all()
+def products(response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Product).where(Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
     # Public catalogue returns only buyer-facing product data, never internal commission settings.
-    public=[]
-    for p in rows:
-        item=product_out(p,db)
+    public=products_out(rows,db)
+    for item in public:
         item.pop('affiliate_rate',None)
         item.pop('platform_rate',None)
         item.pop('status',None)
-        public.append(item)
+    response.headers['Cache-Control']='public, max-age=10, stale-while-revalidate=30'
     return public
 @app.post('/api/merchant/products')
 def add_product(data:ProductIn,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
@@ -159,8 +178,9 @@ def add_product(data:ProductIn,user:User=Depends(require_role('merchant','admin'
     if data.size_guide: db.add(ProductSizeGuide(product_id=p.id,label='دليل المقاسات',measurements=data.size_guide))
     db.commit(); db.refresh(p); return product_out(p,db)
 @app.get('/api/merchant/products')
-def my_products(user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
-    return [product_out(p,db) for p in db.scalars(select(Product).where(Product.merchant_id==user.id)).all()]
+def my_products(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Product).where(Product.merchant_id==user.id).order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    return products_out(rows,db)
 @app.patch('/api/merchant/products/{product_id}/variants')
 def update_product_variants(product_id:int,variants:list[VariantIn],user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     p=db.get(Product,product_id)
@@ -222,12 +242,16 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     db.add(order); db.commit(); db.refresh(order)
     return {'order_number':order.order_number,'status':order.status,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
 @app.get('/api/affiliate/links')
-def affiliate_links(user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
-    return [{'code':l.code,'product_id':l.product_id,'product':db.get(Product,l.product_id).title,'clicks':l.clicks} for l in db.scalars(select(Link).where(Link.affiliate_id==user.id)).all()]
+def affiliate_links(user:User=Depends(require_role('affiliate','admin')),limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+    rows=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id).order_by(Link.created_at.desc()).limit(limit).offset(offset)).all()
+    return [{'code':r.code,'product_id':r.product_id,'product':r.title,'clicks':r.clicks} for r in rows]
 @app.get('/api/affiliate/dashboard')
 def affiliate_dashboard(user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
-    orders=db.scalars(select(Order).where(Order.affiliate_id==user.id)).all()
-    return {'links':[{'code':l.code,'product_id':l.product_id,'product':db.get(Product,l.product_id).title,'clicks':l.clicks} for l in db.scalars(select(Link).where(Link.affiliate_id==user.id)).all()],'orders':[{'order_number':o.order_number,'total':o.total,'commission':o.affiliate_commission,'status':o.status} for o in orders],'pending':round(sum(o.affiliate_commission for o in orders if o.status in ('pending','confirmed','shipped')),2),'approved':round(sum(o.affiliate_commission for o in orders if o.status=='delivered'),2)}
+    links=db.execute(select(Link.code,Link.product_id,Product.title,Link.clicks).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==user.id).order_by(Link.created_at.desc()).limit(100)).all()
+    orders=db.scalars(select(Order).where(Order.affiliate_id==user.id).order_by(Order.created_at.desc()).limit(100)).all()
+    pending=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status.in_(['pending','confirmed','shipped']))) or 0
+    approved=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status=='delivered')) or 0
+    return {'links':[{'code':r.code,'product_id':r.product_id,'product':r.title,'clicks':r.clicks} for r in links],'orders':[{'order_number':o.order_number,'total':o.total,'commission':o.affiliate_commission,'status':o.status} for o in orders],'pending':round(float(pending),2),'approved':round(float(approved),2)}
 @app.post('/api/affiliate/payouts')
 def payout(data:PayoutIn,user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
     delivered=db.scalars(select(Order).where(Order.affiliate_id==user.id,Order.status=='delivered')).all(); earned=sum(o.affiliate_commission for o in delivered)
