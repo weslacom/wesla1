@@ -138,7 +138,15 @@ def apply(data:ApplicationIn,user:User=Depends(current_user),db:Session=Depends(
 @app.get('/api/products')
 def products(db:Session=Depends(get_db)):
     rows=db.scalars(select(Product).where(Product.status=='active').order_by(Product.created_at.desc())).all()
-    return [product_out(p,db) for p in rows]
+    # Public catalogue returns only buyer-facing product data, never internal commission settings.
+    public=[]
+    for p in rows:
+        item=product_out(p,db)
+        item.pop('affiliate_rate',None)
+        item.pop('platform_rate',None)
+        item.pop('status',None)
+        public.append(item)
+    return public
 @app.post('/api/merchant/products')
 def add_product(data:ProductIn,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     platform_rate=data.platform_rate if user.role=='admin' else float(os.getenv('PLATFORM_RATE_DEFAULT','5'))
