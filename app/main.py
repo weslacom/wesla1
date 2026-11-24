@@ -737,6 +737,15 @@ def accept_commission_change(request_id:int,user:User=Depends(current_user),db:S
     x.status='accepted'; x.accepted_at=datetime.now(timezone.utc)
     db.commit(); return {'message':'تمت الموافقة وتفعيل النسبة الجديدة للعمليات القادمة فقط'}
 
+@app.get('/api/admin/negotiations')
+def admin_negotiations(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(ContractNegotiation).order_by(ContractNegotiation.created_at.desc()).limit(200)).all()
+    result=[]
+    for n in rows:
+        c=db.get(Contract,n.contract_id); proposer=db.get(User,n.proposer_id); recipient=db.get(User,n.recipient_id)
+        result.append({'id':n.id,'contract_number':c.contract_number if c else '', 'contract_title':c.title if c else '', 'proposer':proposer.name if proposer else '', 'recipient':recipient.name if recipient else '', 'proposal_text':n.proposal_text,'reason':n.reason,'response_text':n.response_text,'status':n.status,'created_at':n.created_at.isoformat()})
+    return result
+
 @app.get('/api/admin/contracts')
 def admin_contracts(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     return [contract_out(c,db) for c in db.scalars(select(Contract).order_by(Contract.created_at.desc())).all()]
