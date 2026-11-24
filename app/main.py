@@ -526,7 +526,7 @@ CONTRACT_ACKNOWLEDGEMENT="""إقرار بالموافقة والالتزام
 
 def ensure_contract_ack(body:str)->str:
     if 'والله شاهد' in (body or ''): return body
-    return (body or '').rstrip()+'\\n\\n'+CONTRACT_ACKNOWLEDGEMENT
+    return (body or '').rstrip()+chr(10)+chr(10)+CONTRACT_ACKNOWLEDGEMENT
 
 def contract_request_out(row,owner):
     return {'id':row.id,'requested_type':row.requested_type,'title':row.title,'details':row.details,'desired_commission':row.desired_commission,'status':row.status,'admin_note':row.admin_note,'created_at':row.created_at.isoformat(),'user_id':owner.id,'user_name':owner.name,'user_email':owner.email}
@@ -615,7 +615,7 @@ def respond_contract_negotiation(negotiation_id:int,data:ContractNegotiationResp
         original=db.get(Contract,row.contract_id)
         next_version=original.version+1
         number=f'{original.contract_number}-V{next_version}'
-        revised_body=ensure_contract_ack(original.body+'\\n\\nبند مضاف نتيجة التفاوض\\n'+row.proposal_text)
+        revised_body=ensure_contract_ack(original.body+chr(10)+chr(10)+'بند مضاف نتيجة التفاوض'+chr(10)+row.proposal_text)
         revised=Contract(contract_type=original.contract_type,title=f'{original.title} — الإصدار {next_version}',body=revised_body,merchant_id=original.merchant_id,affiliate_id=original.affiliate_id,commission_rate=original.commission_rate,penalty_terms=original.penalty_terms,status='draft',contract_number=number,starts_at=original.starts_at,ends_at=original.ends_at,version=next_version,platform_signer_name=original.platform_signer_name,legal_entity_name=original.legal_entity_name,commission_scope=original.commission_scope,penalty_type=original.penalty_type,penalty_amount=original.penalty_amount,penalty_percent=original.penalty_percent,termination_terms=original.termination_terms)
         db.add(revised); db.flush(); new_contract_id=revised.id
         contract_event(db,original,user,'negotiation_accepted_new_version',{'negotiation_id':row.id,'new_contract_id':new_contract_id,'version':next_version})
