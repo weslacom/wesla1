@@ -54,7 +54,7 @@ def products_out(rows,db):
     for im in db.scalars(select(ProductImage).where(ProductImage.product_id.in_(product_ids)).order_by(ProductImage.product_id,ProductImage.is_primary.desc(),ProductImage.id)).all():
         images_by[im.product_id].append(im)
     guides_by={pid:[] for pid in product_ids}
-    for g in db.scalars(select(ProductSizeGuide).where(ProductSizeGuide.product_id.in_(product_ids)).all()):
+    for g in db.scalars(select(ProductSizeGuide).where(ProductSizeGuide.product_id.in_(product_ids))).all():
         guides_by[g.product_id].append(g)
     result=[]
     for p in rows:
