@@ -9,7 +9,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     monkeypatch.setenv('ADMIN_PASSWORD','StrongPassword123!')
     # Import after setting env; this test is intended to run in a fresh pytest process.
     from app.main import app
-    client=TestClient(app)
+    client=TestClient(app,base_url='https://testserver')
     assert client.get('/health').json()['ok'] is True
     assert client.post('/api/login',json={'email':'root@wesla.test','password':'StrongPassword123!'}).status_code==200
     # Admin authentication must not turn the public homepage into the admin portal.
@@ -48,7 +48,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'affiliate_rate' not in first_page.json()[0]
 
     # Exercise the JSONB-backed contract event and termination evidence paths.
-    merchant_client=TestClient(app)
+    merchant_client=TestClient(app,base_url='https://testserver')
     registration=merchant_client.post('/api/register',json={
         'name':'تاجر الاختبار','email':'merchant@wesla.test','password':'MerchantPass123!'
     })
@@ -109,7 +109,9 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'طباعة / حفظ PDF' in printable.text
     assert 'سجل الموافقات الإلكترونية والأطراف' in printable.text
     assert 'بصمة موافقة الإدارة SHA-256' in printable.text
-    assert 'لا يُعد بذاته شهادة تصديق إلكتروني' in printable.text
+    assert 'ليست توقيعًا رقميًا معتمدًا أو شهادة تصديق إلكتروني' in printable.text
+    assert 'تم التحقق من بصمة سجل الموافقة' in printable.text
+    assert 'نتيجة فحص السلامة' in printable.text
     assert 'Aref Ruqaa' not in printable.text
     terminated=merchant_client.post(f"/api/contracts/{contract['id']}/termination",json={
         'reason':'طلب اختبار لمسار فسخ الاتفاقية.',
@@ -212,7 +214,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert merchant_client.get('/api/notifications/my').status_code==200
 
     # Affiliate removal is personal to that marketer; it does not delete the merchant's product.
-    affiliate_client=TestClient(app)
+    affiliate_client=TestClient(app,base_url='https://testserver')
     affiliate_registration=affiliate_client.post('/api/register',json={
         'name':'مسوق الاختبار','email':'affiliate@wesla.test','password':'AffiliatePass123!'
     })
