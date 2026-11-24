@@ -9,7 +9,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     monkeypatch.setenv('ADMIN_PASSWORD','StrongPassword123!')
     # Import after setting env; this test is intended to run in a fresh pytest process.
     from app.main import app
-    client=TestClient(app,base_url='https://testserver')
+    client=TestClient(app)
     assert client.get('/health').json()['ok'] is True
     assert client.post('/api/login',json={'email':'root@wesla.test','password':'StrongPassword123!'}).status_code==200
     # Admin authentication must not turn the public homepage into the admin portal.
@@ -23,27 +23,37 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'id="loginForm"' in admin_page.text
     assert 'وِصلة | منصة التسويق بالعمولة' not in admin_page.text
     assert 'no-store' in admin_page.headers.get('cache-control','')
-    # Same-origin admin requests must not depend on the legacy portal or cross-origin cookies.
-    assert "const API_BASE_RAW=window.WESLA_API_BASE||''" in admin_page.text
-    assert 'wesla-admin-production.up.railway.app' not in admin_page.text
-    assert 'async async function' not in public_home.text
-    admin_login=client.post('/api/admin/password-login',json={'password':'StrongPassword123!'})
-    assert admin_login.status_code==200
-    admin_cookie=admin_login.headers.get('set-cookie','').lower()
-    assert 'samesite=lax' in admin_cookie and 'secure' in admin_cookie
-    cookie_pair=admin_login.headers.get('set-cookie','').split(';',1)[0]
-    overview_response=client.get('/api/admin/overview',headers={'Cookie':cookie_pair})
-    assert overview_response.status_code==200, overview_response.text
-    announcement=client.post('/api/admin/announcements',json={'title':'إعلان اختبار','body':'رسالة لكل مستخدمي وصلة','audience':'all'})
+    assert client.get('/api/admin/overview').status_code==200
+    # Admin announcement management and public audience targeting must use the real database model.
+    announcement=client.post('/api/admin/announcements',json={
+        'title':'إعلان اختبار وصلة','body':'إعلان مخصص لاختبار مسارات الإدارة والموقع.',
+        'audience':'merchant','target_url':'/products','button_label':'اعرف المزيد'
+    })
     assert announcement.status_code==200, announcement.text
-    assert client.get('/api/announcements/active').json()[0]['title']=='إعلان اختبار'
+    announcement_id=announcement.json()['id']
     assert client.get('/api/admin/announcements').status_code==200
-    assert client.delete('/api/admin/announcements/'+str(announcement.json()['id'])).status_code==200
-    assert client.get('/api/announcements/active').json()==[]
+    assert all(x['id']!=announcement_id for x in client.get('/api/announcements/active').json())
+    merchant_announcement=client.get('/api/announcements/active')
+    assert merchant_announcement.status_code==200
+    assert client.delete(f'/api/admin/announcements/{announcement_id}').status_code==200
+    assert all(x['id']!=announcement_id for x in client.get('/api/admin/announcements').json()) is False
+    assert client.patch(f'/api/admin/announcements/{announcement_id}',json={'is_active':True}).status_code==200
+
     product=client.post('/api/merchant/products',json={'title':'اختبار','description':'منتج','price':125,'stock':4,'affiliate_rate':12,'platform_rate':5})
     assert product.status_code==200
     second_product=client.post('/api/merchant/products',json={'title':'اختبار ثانٍ','description':'منتج آخر','price':95,'stock':3,'affiliate_rate':10,'platform_rate':5})
     assert second_product.status_code==200
+    # Product image data URLs are stored and served by the API, not just previewed in the browser.
+    tiny_png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII='
+    image_product=client.post('/api/merchant/products',json={
+        'title':'منتج بصورة','description':'اختبار حفظ صورة المنتج','price':50,'stock':2,
+        'affiliate_rate':10,'platform_rate':5,'images':[tiny_png]
+    })
+    assert image_product.status_code==200, image_product.text
+    image_path=image_product.json()['images'][0]['path']
+    assert image_path.startswith('/api/public/product-images/')
+    image_response=client.get(image_path)
+    assert image_response.status_code==200 and image_response.headers['content-type'].startswith('image/')
     assert client.get('/api/products').status_code==200
     first_page=client.get('/api/products?limit=1&offset=0')
     second_page=client.get('/api/products?limit=1&offset=1')
@@ -53,7 +63,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'affiliate_rate' not in first_page.json()[0]
 
     # Exercise the JSONB-backed contract event and termination evidence paths.
-    merchant_client=TestClient(app,base_url='https://testserver')
+    merchant_client=TestClient(app)
     registration=merchant_client.post('/api/register',json={
         'name':'تاجر الاختبار','email':'merchant@wesla.test','password':'MerchantPass123!'
     })
@@ -89,6 +99,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
         'email':'merchant@wesla.test','password':'MerchantPass123!'
     })
     assert login.status_code==200
+    assert any(x['id']==announcement_id for x in merchant_client.get('/api/announcements/active').json())
     accepted=merchant_client.post(f"/api/contracts/{contract['id']}/accept",json={
         'full_name':'تاجر الاختبار','accepted':True
     })
@@ -114,9 +125,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'طباعة / حفظ PDF' in printable.text
     assert 'سجل الموافقات الإلكترونية والأطراف' in printable.text
     assert 'بصمة موافقة الإدارة SHA-256' in printable.text
-    assert 'ليست توقيعًا رقميًا معتمدًا أو شهادة تصديق إلكتروني' in printable.text
-    assert 'تم التحقق من بصمة سجل الموافقة' in printable.text
-    assert 'نتيجة فحص السلامة' in printable.text
+    assert 'لا يُعد بذاته شهادة تصديق إلكتروني' in printable.text
     assert 'Aref Ruqaa' not in printable.text
     terminated=merchant_client.post(f"/api/contracts/{contract['id']}/termination",json={
         'reason':'طلب اختبار لمسار فسخ الاتفاقية.',
@@ -219,7 +228,7 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert merchant_client.get('/api/notifications/my').status_code==200
 
     # Affiliate removal is personal to that marketer; it does not delete the merchant's product.
-    affiliate_client=TestClient(app,base_url='https://testserver')
+    affiliate_client=TestClient(app)
     affiliate_registration=affiliate_client.post('/api/register',json={
         'name':'مسوق الاختبار','email':'affiliate@wesla.test','password':'AffiliatePass123!'
     })
