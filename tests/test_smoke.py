@@ -143,11 +143,24 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert all(p['id']!=product_id for p in affiliate_client.get('/api/affiliate/products').json())
     assert any(p['id']==product_id for p in client.get('/api/products').json())
 
-    # Merchant soft-delete preserves the row and admin can restore it.
+    # Active orders block product deletion; after cancellation, soft-delete and restore work.
+    order=client.post('/api/orders',json={'product_id':product_id,'quantity':1,'customer_name':'عميل اختبار','customer_phone':'01000000000','address':'عنوان تجريبي'})
+    assert order.status_code==200, order.text
+    blocked=merchant_client.delete(f'/api/merchant/products/{product_id}')
+    assert blocked.status_code==409
+    cancelled=merchant_client.post(f"/api/merchant/orders/{order.json()['order_number']}/status?status=cancelled")
+    assert cancelled.status_code==200
     deleted=merchant_client.delete(f'/api/merchant/products/{product_id}')
     assert deleted.status_code==200, deleted.text
     assert all(p['id']!=product_id for p in client.get('/api/products').json())
     admin_restore=client.post(f'/api/admin/products/{product_id}/restore')
     assert admin_restore.status_code==200, admin_restore.text
     assert any(p['id']==product_id for p in client.get('/api/products').json())
+    assert client.get('/api/admin/negotiations').status_code==200
+    assert client.get(f'/store/{merchant_id}').status_code==200
+    assert client.get(f'/marketer/{affiliate_id}').status_code==200
+    from app.admin_portal import app as admin_portal_app
+    admin_portal_client=TestClient(admin_portal_app)
+    assert admin_portal_client.get('/').status_code==200
+    assert admin_portal_client.get('/health').json()['service']=='wesla-admin-portal'
 
