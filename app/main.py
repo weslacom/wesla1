@@ -255,10 +255,102 @@ def merchant_product_detail(product_id:int,user:User=Depends(require_role('merch
     if not p or (user.role!='admin' and p.merchant_id!=user.id): raise HTTPException(404,'المنتج غير موجود')
     return product_out(p,db)
 
+@app.get('/api/public/stores/{user_id}')
+def public_store(user_id:int,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+    owner=db.get(User,user_id)
+    if not owner or owner.role!='merchant' or owner.status!='active': raise HTTPException(404,'المتجر غير موجود')
+    rows=db.scalars(select(Product).where(Product.merchant_id==owner.id,Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    items=products_out(rows,db)
+    for item in items:
+        item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
+    return {'id':owner.id,'name':owner.name,'products':items,'contact_phone':owner.contact_phone if owner.contact_public else None,'contact_whatsapp':owner.contact_whatsapp if owner.contact_public else None}
+
+@app.get('/api/public/marketers/{user_id}')
+def public_marketer(user_id:int,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+    owner=db.get(User,user_id)
+    if not owner or owner.role!='affiliate' or owner.status!='active': raise HTTPException(404,'صفحة المسوق غير موجودة')
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==owner.id)
+    rows=db.execute(select(Link,Product).join(Product,Product.id==Link.product_id).where(Link.affiliate_id==owner.id,Product.status=='active',Product.id.not_in(excluded)).order_by(Link.created_at.desc()).limit(limit).offset(offset)).all()
+    products=products_out([p for _,p in rows],db)
+    for item in products:
+        item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
+    links_by_product={link.product_id:link for link,_ in rows}
+    for item in products:
+        link=links_by_product[item['id']]
+        item['referral_url']=f"/r/{link.code}"; item['clicks']=link.clicks
+    return {'id':owner.id,'name':owner.name,'products':products,'contact_phone':owner.contact_phone if owner.contact_public else None,'contact_whatsapp':owner.contact_whatsapp if owner.contact_public else None}
+
+@app.get('/store/{user_id}')
+def store_page(user_id:int): return FileResponse('app/static/index.html')
+@app.get('/marketer/{user_id}')
+def marketer_page(user_id:int): return FileResponse('app/static/index.html')
+@app.get('/p/{product_id}')
+def product_share_page(product_id:int): return RedirectResponse(url=f'/?product={product_id}',status_code=302)
+
+def soft_delete_product(product:Product,actor:User,db:Session,reason:str=''):
+    if product.status=='deleted': raise HTTPException(409,'المنتج محذوف بالفعل')
+    active_order=db.scalar(select(Order.id).where(Order.product_id==product.id,Order.status.in_(['pending','confirmed','shipped'])).limit(1))
+    if active_order: raise HTTPException(409,'لا يمكن حذف المنتج لوجود طلبات نشطة مرتبطة به')
+    product.status='deleted'; product.deleted_at=datetime.now(timezone.utc)
+    product.deleted_by=actor.id; product.deleted_by_role=actor.role; product.deleted_reason=reason[:2000]
+    db.add(ProductAuditEvent(product_id=product.id,actor_user_id=actor.id,action='soft_deleted',details={'role':actor.role,'reason':reason[:2000]}))
+
+@app.delete('/api/merchant/products/{product_id}')
+def merchant_delete_product(product_id:int,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product or product.merchant_id!=user.id: raise HTTPException(404,'المنتج غير موجود')
+    soft_delete_product(product,user,db,'حذف بواسطة التاجر')
+    db.commit(); return {'message':'تم نقل المنتج إلى المحذوفات المؤقتة'}
+
+@app.delete('/api/admin/products/{product_id}')
+def admin_delete_product(product_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product: raise HTTPException(404,'المنتج غير موجود')
+    soft_delete_product(product,user,db,'حذف إداري')
+    db.commit(); return {'message':'تم إخفاء المنتج وتسجيل العملية في سجل المراجعة'}
+
+@app.post('/api/admin/products/{product_id}/restore')
+def admin_restore_product(product_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product or product.status!='deleted': raise HTTPException(404,'المنتج المحذوف غير موجود')
+    product.status='active'; product.deleted_at=None; product.deleted_by=None; product.deleted_by_role=None; product.deleted_reason=''
+    db.add(ProductAuditEvent(product_id=product.id,actor_user_id=user.id,action='restored',details={}))
+    db.commit(); return {'message':'تمت استعادة المنتج'}
+
+@app.get('/api/admin/products')
+def admin_products(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Product).order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    items=products_out(rows,db)
+    for item in items:
+        item['deleted_at']=next((p.deleted_at.isoformat() for p in rows if p.id==item['id'] and p.deleted_at),None)
+        item['deleted_by_role']=next((p.deleted_by_role for p in rows if p.id==item['id']),None)
+    return items
+
+@app.delete('/api/affiliate/products/{product_id}')
+def affiliate_hide_product(product_id:int,user:User=Depends(require_role('affiliate')),db:Session=Depends(get_db)):
+    product=db.get(Product,product_id)
+    if not product or product.status!='active': raise HTTPException(404,'المنتج غير موجود')
+    old=db.scalar(select(AffiliateProductExclusion).where(AffiliateProductExclusion.affiliate_id==user.id,AffiliateProductExclusion.product_id==product.id))
+    if not old:
+        db.add(AffiliateProductExclusion(affiliate_id=user.id,product_id=product.id))
+        db.add(ProductAuditEvent(product_id=product.id,actor_user_id=user.id,action='hidden_by_affiliate',details={'affiliate_id':user.id}))
+    db.commit(); return {'message':'تمت إزالة المنتج من قائمتك التسويقية فقط، ولم يُحذف من متجر التاجر'}
+
+@app.get('/api/affiliate/products')
+def affiliate_available_products(limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('affiliate')),db:Session=Depends(get_db)):
+    excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==user.id)
+    rows=db.scalars(select(Product).where(Product.status=='active',Product.id.not_in(excluded)).order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    items=products_out(rows,db)
+    for item in items:
+        item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
+    return items
+
 @app.post('/api/affiliate/links/{product_id}')
 def create_link(product_id:int,user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
     p=db.get(Product,product_id)
     if not p or p.status!='active': raise HTTPException(404,'المنتج غير موجود')
+    hidden=db.scalar(select(AffiliateProductExclusion).where(AffiliateProductExclusion.affiliate_id==user.id,AffiliateProductExclusion.product_id==product_id))
+    if hidden: db.delete(hidden)
     link=db.scalar(select(Link).where(Link.affiliate_id==user.id,Link.product_id==product_id))
     if not link:
         link=Link(code=secrets.token_urlsafe(8),affiliate_id=user.id,product_id=product_id); db.add(link); db.commit(); db.refresh(link)
