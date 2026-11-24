@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Integer, Float, Numeric, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import String, Integer, Float, Numeric, DateTime, ForeignKey, Text, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -141,7 +141,7 @@ class ProductSizeGuide(Base):
     id: Mapped[int]=mapped_column(primary_key=True)
     product_id: Mapped[int]=mapped_column(ForeignKey('products.id', ondelete='CASCADE'), index=True)
     label: Mapped[str]=mapped_column(String(80))
-    measurements: Mapped[str]=mapped_column(Text, default='{}')
+    measurements: Mapped[dict]=mapped_column(JSON, default=dict)
 
 class ProductImage(Base):
     __tablename__='product_images'
