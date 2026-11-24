@@ -78,6 +78,18 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     })
     assert accepted.status_code==200
     assert accepted.json()['status']=='active'
+    from app.database import SessionLocal
+    legacy_db=SessionLocal()
+    try:
+        legacy_contract=legacy_db.get(Contract,contract['id'])
+        legacy_contract.status='signed'
+        legacy_contract.final_hash='a'*64
+        legacy_db.commit()
+    finally:
+        legacy_db.close()
+    reopened=client.post(f"/api/admin/contracts/{contract['id']}/reopen-for-platform-approval")
+    assert reopened.status_code==200, reopened.text
+    assert reopened.json()['status']=='active'
     admin_approved=client.post(f"/api/admin/contracts/{contract['id']}/approve",json={'accepted':True})
     assert admin_approved.status_code==200, admin_approved.text
     assert admin_approved.json()['status']=='signed'
