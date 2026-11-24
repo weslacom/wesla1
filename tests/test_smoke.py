@@ -12,6 +12,17 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     client=TestClient(app)
     assert client.get('/health').json()['ok'] is True
     assert client.post('/api/login',json={'email':'root@wesla.test','password':'StrongPassword123!'}).status_code==200
+    # Admin authentication must not turn the public homepage into the admin portal.
+    public_home=client.get('/')
+    assert public_home.status_code==200
+    assert 'وِصلة | منصة التسويق بالعمولة' in public_home.text
+    assert 'id="loginForm"' not in public_home.text
+    assert 'no-store' in public_home.headers.get('cache-control','')
+    admin_page=client.get('/control',follow_redirects=False)
+    assert admin_page.status_code==200
+    assert 'id="loginForm"' in admin_page.text
+    assert 'وِصلة | منصة التسويق بالعمولة' not in admin_page.text
+    assert 'no-store' in admin_page.headers.get('cache-control','')
     assert client.get('/api/admin/overview').status_code==200
     product=client.post('/api/merchant/products',json={'title':'اختبار','description':'منتج','price':125,'stock':4,'affiliate_rate':12,'platform_rate':5})
     assert product.status_code==200
