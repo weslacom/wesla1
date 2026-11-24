@@ -539,7 +539,9 @@ def merchant_orders(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(de
 @app.post('/api/merchant/orders/{order_number}/status')
 def update_order(order_number:str,status:str,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     if status not in ('confirmed','shipped','delivered','cancelled','returned'): raise HTTPException(400,'حالة الطلب غير صحيحة')
-    o=db.scalar(select(Order).where(Order.order_number==order_number,Order.merchant_id==user.id))
+    order_query=select(Order).where(Order.order_number==order_number)
+    if user.role!='admin': order_query=order_query.where(Order.merchant_id==user.id)
+    o=db.scalar(order_query)
     if not o: raise HTTPException(404,'الطلب غير موجود')
     if o.status in ('cancelled','returned','delivered'): raise HTTPException(409,'لا يمكن تغيير حالة هذا الطلب')
     o.status=status
@@ -549,7 +551,7 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
             v=db.get(ProductVariant,o.variant_id)
             if v: v.stock+=o.quantity
         o.affiliate_commission=0; o.platform_commission=0
-        notify_user(o.merchant_id,'تم إلغاء/إرجاع الطلب',f'الطلب {o.order_number} — تم إلغاء احتساب العمولات.')
+        notify_user(db,o.merchant_id,'تم إلغاء/إرجاع الطلب',f'الطلب {o.order_number} — تم إلغاء احتساب العمولات.')
         if o.affiliate_id: notify_user(db,o.affiliate_id,'تم إلغاء عمولة طلب',f'الطلب {o.order_number} لم يكتمل، لذلك لن تُحتسب عمولة.')
     elif status=='delivered':
         notify_user(db,o.merchant_id,'تم تسليم الطلب',f'الطلب {o.order_number} تم تسليمه بنجاح. صافي قيمة البيع {round(float(o.total)-float(o.affiliate_commission or 0)-float(o.platform_commission or 0),2)} جنيه.')
