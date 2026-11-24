@@ -5,16 +5,20 @@ from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from .database import Base, engine, get_db, SessionLocal
-from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest
+from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification
 
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
 # Compress JSON and HTML responses to reduce bandwidth for mobile visitors.
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+admin_origins=[x.strip() for x in os.getenv('ADMIN_PORTAL_ORIGINS','').split(',') if x.strip()]
+if admin_origins:
+    app.add_middleware(CORSMiddleware,allow_origins=admin_origins,allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Content-Type'])
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 
 # Passwords use PBKDF2; sessions are random opaque tokens stored only as hashes.
@@ -40,7 +44,7 @@ def require_role(*roles):
         return user
     return dep
 
-def public_user(u): return {'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status}
+def public_user(u): return {'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status,'contact_phone':u.contact_phone,'contact_whatsapp':u.contact_whatsapp,'contact_public':u.contact_public}
 def products_out(rows,db):
     """Serialize a page of products with a fixed number of queries (not N+1 queries)."""
     if not rows: return []
@@ -90,12 +94,32 @@ class OrderIn(BaseModel):
     product_id:int; quantity:int=Field(ge=1,le=20); customer_name:str; customer_phone:str; address:str
     referral_code:str|None=None; variant_id:int|None=None
 class PayoutIn(BaseModel): amount:float=Field(gt=0); method:str; destination:str
+class ContactIn(BaseModel):
+    contact_phone:str|None=Field(default=None,max_length=40)
+    contact_whatsapp:str|None=Field(default=None,max_length=40)
+    contact_public:bool=False
+class ContractRequestIn(BaseModel):
+    title:str=Field(min_length=3,max_length=180)
+    details:str=Field(min_length=20,max_length=5000)
+    desired_commission:float|None=Field(default=None,ge=0,le=100)
+class ContractRequestDecision(BaseModel):
+    decision:str
+    admin_note:str=Field(default='',max_length=2000)
+class ContractNegotiationIn(BaseModel):
+    proposal_text:str=Field(min_length=5,max_length=5000)
+    reason:str=Field(default='',max_length=2000)
+    recipient_user_id:int|None=None
+class ContractNegotiationResponseIn(BaseModel):
+    decision:str
+    response_text:str=Field(default='',max_length=5000)
 
 @app.get('/')
 def home(): return FileResponse('app/static/index.html')
 @app.get('/control')
 def control_page():
-    # The console authenticates via admin-only APIs; never redirect users to public home.
+    # Once the independent admin portal is deployed, keep its assets off the public site.
+    admin_url=os.getenv('ADMIN_PORTAL_URL','').strip()
+    if admin_url: return RedirectResponse(admin_url,status_code=307)
     return FileResponse('app/static/control.html')
 
 @app.get('/health')
@@ -148,6 +172,32 @@ def logout(response:Response,request:Request,db:Session=Depends(get_db)):
     response.delete_cookie('wesla_session'); return {'ok':True}
 @app.get('/api/me')
 def me(user:User=Depends(current_user)): return {'user':public_user(user)}
+
+@app.patch('/api/me/contact')
+def update_contact(data:ContactIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    phone=(data.contact_phone or '').strip() or None
+    whatsapp=(data.contact_whatsapp or '').strip() or None
+    if data.contact_public and not (phone or whatsapp):
+        raise HTTPException(400,'أضف رقم هاتف أو واتساب قبل إظهار بيانات التواصل')
+    user.contact_phone=phone; user.contact_whatsapp=whatsapp; user.contact_public=data.contact_public
+    db.commit(); db.refresh(user)
+    return {'message':'تم حفظ بيانات التواصل','user':public_user(user)}
+
+def notify_user(db,user_id,title,body='',target_url=''):
+    db.add(Notification(user_id=user_id,title=title,body=body,target_url=target_url))
+
+@app.get('/api/notifications/my')
+def my_notifications(limit:int=Query(default=30,ge=1,le=100),user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc()).limit(limit)).all()
+    unread=db.scalar(select(func.count(Notification.id)).where(Notification.user_id==user.id,Notification.read_at.is_(None))) or 0
+    return {'unread':unread,'items':[{'id':n.id,'title':n.title,'body':n.body,'target_url':n.target_url,'read':n.read_at is not None,'created_at':n.created_at.isoformat()} for n in rows]}
+
+@app.post('/api/notifications/{notification_id}/read')
+def read_notification(notification_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    n=db.get(Notification,notification_id)
+    if not n or n.user_id!=user.id: raise HTTPException(404,'الإشعار غير موجود')
+    if n.read_at is None: n.read_at=datetime.now(timezone.utc); db.commit()
+    return {'ok':True}
 @app.post('/api/applications')
 def apply(data:ApplicationIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     if data.role not in ('merchant','affiliate'): raise HTTPException(400,'نوع الحساب غير صحيح')
