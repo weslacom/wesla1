@@ -73,7 +73,7 @@ def products_out(rows,db):
         result.append({'id':p.id,'title':p.title,'description':p.description,'price':p.price,'stock':p.stock,'affiliate_rate':p.affiliate_rate,'platform_rate':p.platform_rate,'status':p.status,'merchant':merchant.name if merchant else '',
           'product_type':p.product_type,'size_system':p.size_system,'has_variants':p.has_variants,
           'variants':[{'id':v.id,'color':v.color,'size':v.size_label,'size_system':v.size_system,'stock':v.stock,'price':v.price_override,'foot_length_cm':v.foot_length_cm} for v in variants_by[p.id]],
-          'images':[{'id':im.id,'path':im.storage_path,'primary':im.is_primary} for im in images_by[p.id]],
+          'images':[{'id':im.id,'path':f'/api/public/product-images/{im.id}','primary':im.is_primary} for im in images_by[p.id]],
           'size_guide':[{'label':g.label,'measurements':g.measurements if isinstance(g.measurements,dict) else json.loads(g.measurements or '{}')} for g in guides_by[p.id]]})
     return result
 
@@ -238,6 +238,18 @@ def products(response:Response,limit:int=Query(default=48,ge=1,le=100),offset:in
         item.pop('status',None)
     response.headers['Cache-Control']='public, max-age=10, stale-while-revalidate=30'
     return public
+@app.get('/api/public/product-images/{image_id}')
+def public_product_image(image_id:int,db:Session=Depends(get_db)):
+    image_row=db.get(ProductImage,image_id)
+    if not image_row: raise HTTPException(404,'الصورة غير موجودة')
+    try:
+        header,payload=image_row.storage_path.split(',',1)
+        mime=header.removeprefix('data:').removesuffix(';base64')
+        if mime not in ('image/jpeg','image/png','image/webp'): raise ValueError('invalid mime')
+        raw=base64.b64decode(payload,validate=True)
+    except Exception: raise HTTPException(404,'ملف الصورة غير صالح')
+    return Response(content=raw,media_type=mime,headers={'Cache-Control':'public, max-age=31536000, immutable'})
+
 @app.post('/api/merchant/products')
 def add_product(data:ProductIn,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     platform_rate=data.platform_rate if user.role=='admin' else float(os.getenv('PLATFORM_RATE_DEFAULT','5'))
