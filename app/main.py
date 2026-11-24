@@ -557,6 +557,8 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
         notify_user(db,o.merchant_id,'تم تسليم الطلب',f'الطلب {o.order_number} تم تسليمه بنجاح. صافي قيمة البيع {round(float(o.total)-float(o.affiliate_commission or 0)-float(o.platform_commission or 0),2)} جنيه.')
         if o.affiliate_id:
             notify_user(db,o.affiliate_id,'عمولتك أصبحت مستحقة',f'تم تسليم الطلب {o.order_number}. عمولتك {o.affiliate_commission} جنيه.')
+        for admin_user in db.scalars(select(User).where(User.role=='admin',User.status=='active')).all():
+            notify_user(db,admin_user.id,'عمولة منصة جديدة',f'اكتمل بيع الطلب {o.order_number}. عمولة وصلة {o.platform_commission} جنيه'+(f'، وعمولة المسوق {o.affiliate_commission} جنيه.' if o.affiliate_id else '.'),'/control')
     db.commit(); return {'message':'تم تحديث حالة الطلب. تم تحديث العمولات والإشعارات فورًا.'}
 @app.get('/api/admin/users')
 def admin_users(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
@@ -582,7 +584,7 @@ def decide_application(app_id:int,decision:str,user:User=Depends(require_role('a
 @app.get('/api/admin/orders')
 def admin_orders(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.scalars(select(Order).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
-    return [{'order_number':o.order_number,'customer':o.customer_name,'total':o.total,'affiliate_commission':o.affiliate_commission,'platform_commission':o.platform_commission,'status':o.status} for o in rows]
+    return [{'order_number':o.order_number,'customer':o.customer_name,'total':float(o.total),'affiliate_commission':float(o.affiliate_commission or 0) if o.status=='delivered' else None,'platform_commission':float(o.platform_commission or 0) if o.status=='delivered' else None,'status':o.status,'commission_status':'مستحقة' if o.status=='delivered' else 'تظهر بعد التسليم'} for o in rows]
 @app.get('/api/admin/payouts')
 def admin_payouts(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(select(Payout,User.name).join(User,User.id==Payout.affiliate_id).where(Payout.status=='pending').order_by(Payout.created_at.desc()).limit(limit).offset(offset)).all()
