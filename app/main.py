@@ -744,15 +744,38 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     if not c or not can_view_contract(c,user): raise HTTPException(404,'العقد غير موجود')
     if c.status!='signed': raise HTTPException(409,'لا تتوفر نسخة نهائية قبل اكتمال التوقيعات')
     from fastapi.responses import HTMLResponse
-    parties=''.join(f'<p>{a.full_name} — {a.accepted_at.isoformat()}</p>' for a in db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id)).all())
-    safe=lambda x: str(x or '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
-    html=f"""<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>{safe(c.contract_number)}</title>
-    <style>@page{{size:A4;margin:18mm}}body{{font:16px Tahoma,Arial;line-height:2;margin:0 auto;max-width:820px;padding:38px;color:#252a35;background:#fffdf7;border:8px double #b9974b;box-shadow:inset 0 0 0 2px #ead9ae}}h1{{color:#8d6a24;text-align:center;letter-spacing:2px;border-bottom:1px solid #d8c28c;padding-bottom:18px}}h2{{color:#34445a;text-align:center}}h3{{color:#8d6a24;border-bottom:1px solid #e6d9b7;padding-bottom:6px}}.sig{{display:inline-block;border:2px solid #b9974b;padding:18px 32px;border-radius:12px;font:bold 26px Georgia;color:#8d6a24;background:#fffaf0}}.meta{{background:#f7f0df;border:1px solid #dfcfaa;padding:12px 18px;border-radius:8px}}.ack{{margin-top:24px;padding:18px;border:1px solid #c7a65b;background:#fffaf0;white-space:pre-line}}@media print{{body{{box-shadow:none}}button{{display:none}}}}</style>
-    <h1>WESLA | اتفاقية إلكترونية</h1><h2>{safe(c.title)}</h2><p>رقم العقد: {safe(c.contract_number)} | الإصدار: {c.version}</p>
-    <p>الجهة المتعاقدة: {safe(c.legal_entity_name or 'الاسم القانوني للطرف المتعاقد')}</p><article>{safe(c.body).replace(chr(10),'<br>')}</article>
-    <h3>العمولات</h3><p>{safe(c.commission_rate)}% — {safe(c.commission_scope)}</p><h3>الشروط الجزائية</h3><p>{safe(c.penalty_terms)}</p><p>{safe(c.termination_terms)}</p>
-    <h3>موافقات الأطراف</h3>{parties}<h3>اعتماد المنصة</h3><div class="sig">WESLA</div><p>{safe(c.platform_signer_name)} — {safe(c.approved_at)}</p><p>بصمة النسخة: {safe(c.final_hash)}</p>
-    <p class="meta">تُحفظ هذه النسخة بسجل الموافقات والبصمة الرقمية للأطراف، وتُقدَّر حجيتها وفقًا للقانون المصري والضوابط المنظمة للتوقيع الإلكتروني.</p><button onclick="print()">طباعة / حفظ PDF</button></html>"""
+    acceptances=db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id).order_by(ContractAcceptance.accepted_at)).all()
+    acceptance_by_user={a.user_id:a for a in acceptances}
+    merchant=db.get(User,c.merchant_id) if c.merchant_id else None
+    affiliate=db.get(User,c.affiliate_id) if c.affiliate_id else None
+    party_specs=[]
+    if merchant: party_specs.append(('التاجر',merchant.id,merchant.name))
+    if affiliate: party_specs.append(('المسوق',affiliate.id,affiliate.name))
+    if len(party_specs)==1:
+        party_specs.append(('المنصة',None,c.platform_signer_name or 'WESLA | منصة وصلة'))
+    signature_cards=[]
+    for role,uid,display_name in party_specs[:2]:
+        accepted=acceptance_by_user.get(uid) if uid else None
+        signed_name=accepted.full_name if accepted else (display_name if uid is None else 'بانتظار التوقيع')
+        signed_date=accepted.accepted_at.isoformat() if accepted else (c.approved_at.isoformat() if uid is None and c.approved_at else 'اعتماد المنصة')
+        signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="signature-name">{safe(signed_name)}</div><div class="signature-rule"></div><div class="party-name">{safe(display_name)}</div><div class="signature-date">{safe(signed_date)}</div><div class="signed-status">{"تم التوقيع إلكترونيًا" if accepted or uid is None else "بانتظار التوقيع"}</div></section>')
+    signatures=''.join(signature_cards)
+    penalty_type_labels={'fixed':'مبلغ ثابت','percentage':'نسبة مئوية','both':'مبلغ ثابت ونسبة مئوية'}
+    penalty_type_label=penalty_type_labels.get(c.penalty_type,c.penalty_type or 'غير محدد')
+    penalty_amount_text=(f'{safe(c.penalty_amount)} جنيه مصري' if c.penalty_amount is not None else 'غير محدد')
+    penalty_percent_text=(f'{safe(c.penalty_percent)}%' if c.penalty_percent is not None else 'غير محددة')
+    safe=lambda x: str(x or '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;').replace("'","&#39;")
+    html=f"""<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{safe(c.contract_number)}</title>
+    <style>@import url('https://fonts.googleapis.com/css2?family=Aref+Ruqaa+Ink:wght@400;700&display=swap');@page{{size:A4;margin:15mm}}*{{box-sizing:border-box}}body{{font:15px Tahoma,Arial;line-height:2;margin:0 auto;max-width:850px;padding:32px;color:#252a35;background:#fffdf7;border:8px double #b9974b;box-shadow:inset 0 0 0 2px #ead9ae}}h1{{color:#8d6a24;text-align:center;letter-spacing:2px;border-bottom:1px solid #d8c28c;padding-bottom:18px}}h2{{color:#34445a;text-align:center}}h3{{color:#8d6a24;border-bottom:1px solid #e6d9b7;padding-bottom:6px;margin-top:25px}}.meta{{background:#f7f0df;border:1px solid #dfcfaa;padding:12px 18px;border-radius:8px;margin:10px 0}}.contract-data{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}.data-cell{{background:#f8f4e9;border:1px solid #e6d9b7;padding:10px 14px;border-radius:8px}}.data-cell b{{display:block;color:#80601f}}.penalty{{background:#fff2e8;border:2px solid #c67b48;padding:15px 18px;border-radius:10px}}.penalty-amount{{font-size:24px;font-weight:bold;color:#9a3d20}}.signature-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:14px;direction:rtl}}.signature-card{{min-width:0;text-align:center;border:1px solid #d7c18e;border-radius:12px;padding:12px 10px;background:linear-gradient(180deg,#fffdf7,#fbf5e6);break-inside:avoid}}.party-role{{font-weight:bold;color:#8d6a24}}.signature-name{{font-family:'Aref Ruqaa Ink','Amiri','Traditional Arabic',cursive;font-size:36px;line-height:1.6;color:#173f70;transform:rotate(-3deg);text-shadow:.4px .4px 0 #173f70;white-space:normal;overflow-wrap:anywhere;min-height:66px}}.signature-rule{{width:82%;margin:0 auto 7px;border-bottom:1px solid #9a8350}}.party-name{{font-weight:bold}}.signature-date{{font-size:11px;color:#667085;direction:ltr;overflow-wrap:anywhere}}.signed-status{{font-size:11px;color:#28734b;margin-top:4px}}.body-text{{white-space:pre-wrap}}.meta{{background:#f7f0df;border:1px solid #dfcfaa;padding:12px 18px;border-radius:8px}}@media(max-width:560px){{body{{padding:16px;border-width:4px}}.contract-data{{grid-template-columns:1fr}}.signature-grid{{gap:8px}}.signature-name{{font-size:28px}}}}@media print{{body{{box-shadow:none}}button{{display:none}}}}</style>
+    <h1>WESLA | اتفاقية إلكترونية</h1><h2>{safe(c.title)}</h2>
+    <div class="contract-data"><div class="data-cell"><b>رقم العقد</b>{safe(c.contract_number)}</div><div class="data-cell"><b>رقم الإصدار</b>{safe(c.version)}</div><div class="data-cell"><b>تاريخ الإنشاء</b>{safe(c.created_at.isoformat() if c.created_at else '')}</div><div class="data-cell"><b>حالة العقد</b>{safe(c.status)}</div><div class="data-cell"><b>التاجر</b>{safe(merchant.name if merchant else 'غير منطبق')}</div><div class="data-cell"><b>المسوق</b>{safe(affiliate.name if affiliate else 'غير منطبق')}</div><div class="data-cell"><b>الكيان القانوني</b>{safe(c.legal_entity_name or 'غير محدد')}</div><div class="data-cell"><b>مدة الاتفاقية</b>من {safe(c.starts_at.isoformat() if c.starts_at else 'غير محدد')} إلى {safe(c.ends_at.isoformat() if c.ends_at else 'غير محدد')}</div></div>
+    <h3>نص الاتفاقية وجميع البنود</h3><article class="body-text">{safe(c.body)}</article>
+    <h3>العمولات</h3><div class="data-cell"><b>نسبة العمولة</b>{safe(c.commission_rate)}%<br><b>نطاق احتساب العمولة</b>{safe(c.commission_scope)}</div>
+    <h3>الشرط الجزائي</h3><div class="penalty"><b>نوع الشرط الجزائي:</b> {safe(penalty_type_label)}<br><b>القيمة المالية:</b> <span class="penalty-amount">{penalty_amount_text}</span><br><b>النسبة:</b> <span class="penalty-amount">{penalty_percent_text}</span><br><b>تفاصيل الشرط الجزائي:</b><div class="body-text">{safe(c.penalty_terms or 'لا توجد تفاصيل إضافية مسجلة')}</div></div>
+    <h3>شروط الإنهاء والفسخ</h3><div class="body-text">{safe(c.termination_terms or 'لا توجد شروط إضافية مسجلة')}</div>
+    <h3>توقيعات الأطراف الإلكترونية</h3><div class="signature-grid">{signatures}</div>
+    <h3>اعتماد المنصة والبصمة الرقمية</h3><div class="data-cell"><b>المعتمد</b>{safe(c.platform_signer_name or 'WESLA | منصة وصلة')}<br><b>تاريخ الاعتماد</b>{safe(c.approved_at.isoformat() if c.approved_at else '—')}<br><b>بصمة النسخة النهائية</b><span style="direction:ltr;display:block;overflow-wrap:anywhere">{safe(c.final_hash)}</span></div>
+    <p class="meta">هذا المستند يعرض سجل الموافقات الإلكترونية المسجلة على الاتفاقية. الشكل الطباعي للأسماء تمثيل بصري ولا يُعد صورة لتوقيعٍ حر مرسوم باليد أو شهادة تصديق إلكتروني مستقلة. تُقدّر الحجية وفقًا للقانون المصري والضوابط المنظمة للتوقيع الإلكتروني.</p><button onclick="print()">طباعة / حفظ PDF</button></html>"""
     return HTMLResponse(html)
 
 @app.post('/api/contracts/{contract_id}/termination')
