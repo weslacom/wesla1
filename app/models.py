@@ -157,7 +157,7 @@ class ContractEvent(Base):
     contract_id: Mapped[int]=mapped_column(ForeignKey('contracts.id', ondelete='CASCADE'), index=True)
     actor_user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
     event_type: Mapped[str]=mapped_column(String(40))
-    details: Mapped[str]=mapped_column(Text, default='{}')
+    details: Mapped[dict]=mapped_column(JSON, default=dict)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 
 class ContractTerminationRequest(Base):
