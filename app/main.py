@@ -194,12 +194,12 @@ def track(code:str,request:Request,db:Session=Depends(get_db)):
     return response
 @app.post('/api/orders')
 def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
-    p=db.get(Product,data.product_id)
+    p=db.scalar(select(Product).where(Product.id==data.product_id).with_for_update())
     if not p or p.status!='active': raise HTTPException(404,'المنتج غير متاح')
     variant=None
     if p.has_variants:
         if not data.variant_id: raise HTTPException(400,'اختر اللون والمقاس أولاً')
-        variant=db.get(ProductVariant,data.variant_id)
+        variant=db.scalar(select(ProductVariant).where(ProductVariant.id==data.variant_id,ProductVariant.product_id==p.id).with_for_update())
         if not variant or variant.product_id!=p.id: raise HTTPException(400,'اختيار المقاس غير صحيح')
         if variant.stock<data.quantity: raise HTTPException(409,'الكمية غير متاحة لهذا اللون والمقاس')
     elif p.stock<data.quantity: raise HTTPException(409,'الكمية المطلوبة غير متاحة حالياً')
