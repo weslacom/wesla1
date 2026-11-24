@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from sqlalchemy import String, Integer, Float, Numeric, DateTime, ForeignKey, Text, UniqueConstraint, JSON, Boolean
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -148,7 +149,7 @@ class ProductSizeGuide(Base):
     id: Mapped[int]=mapped_column(primary_key=True)
     product_id: Mapped[int]=mapped_column(ForeignKey('products.id', ondelete='CASCADE'), index=True)
     label: Mapped[str]=mapped_column(String(80))
-    measurements: Mapped[dict]=mapped_column(JSON, default=dict)
+    measurements: Mapped[dict]=mapped_column(JSON().with_variant(JSONB(), 'postgresql'), default=dict)
 
 class ProductImage(Base):
     __tablename__='product_images'
@@ -164,7 +165,7 @@ class ContractEvent(Base):
     contract_id: Mapped[int]=mapped_column(ForeignKey('contracts.id', ondelete='CASCADE'), index=True)
     actor_user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
     event_type: Mapped[str]=mapped_column(String(40))
-    details: Mapped[dict]=mapped_column(JSON, default=dict)
+    details: Mapped[dict]=mapped_column(JSON().with_variant(JSONB(), 'postgresql'), default=dict)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 
 class ContractTerminationRequest(Base):
@@ -173,7 +174,7 @@ class ContractTerminationRequest(Base):
     contract_id: Mapped[int]=mapped_column(ForeignKey('contracts.id', ondelete='CASCADE'), index=True)
     requester_user_id: Mapped[int]=mapped_column(ForeignKey('users.id'))
     reason: Mapped[str]=mapped_column(Text)
-    evidence_paths: Mapped[list]=mapped_column(JSON, default=list)
+    evidence_paths: Mapped[list]=mapped_column(JSON().with_variant(JSONB(), 'postgresql'), default=list)
     status: Mapped[str]=mapped_column(String(30), default='under_review')
     decision_reason: Mapped[str|None]=mapped_column(Text, nullable=True)
     decided_by: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
@@ -210,7 +211,7 @@ class ProductAuditEvent(Base):
     product_id: Mapped[int]=mapped_column(ForeignKey('products.id'), index=True)
     actor_user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
     action: Mapped[str]=mapped_column(String(40))
-    details: Mapped[dict]=mapped_column(JSON, default=dict)
+    details: Mapped[dict]=mapped_column(JSON().with_variant(JSONB(), 'postgresql'), default=dict)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 
 class ContractRequest(Base):
