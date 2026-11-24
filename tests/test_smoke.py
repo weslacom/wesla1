@@ -23,6 +23,17 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'id="loginForm"' in admin_page.text
     assert 'وِصلة | منصة التسويق بالعمولة' not in admin_page.text
     assert 'no-store' in admin_page.headers.get('cache-control','')
+    # The dedicated admin origin must call the main API cross-origin and retain its secure session cookie.
+    assert "https://wesla-web-production.up.railway.app" in admin_page.text
+    assert "credentials:'include'" in admin_page.text
+    preflight=client.options('/api/admin/overview',headers={'Origin':'https://wesla-admin-production.up.railway.app','Access-Control-Request-Method':'GET','Access-Control-Request-Headers':'content-type'})
+    assert preflight.status_code==200
+    assert preflight.headers.get('access-control-allow-origin')=='https://wesla-admin-production.up.railway.app'
+    assert preflight.headers.get('access-control-allow-credentials')=='true'
+    admin_login=client.post('/api/admin/password-login',json={'password':'StrongPassword123!'},headers={'Origin':'https://wesla-admin-production.up.railway.app'})
+    assert admin_login.status_code==200
+    admin_cookie=admin_login.headers.get('set-cookie','').lower()
+    assert 'samesite=none' in admin_cookie and 'secure' in admin_cookie
     assert client.get('/api/admin/overview').status_code==200
     product=client.post('/api/merchant/products',json={'title':'اختبار','description':'منتج','price':125,'stock':4,'affiliate_rate':12,'platform_rate':5})
     assert product.status_code==200
