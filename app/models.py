@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Integer, Float, Numeric, DateTime, ForeignKey, Text, UniqueConstraint, JSON
+from sqlalchemy import String, Integer, Float, Numeric, DateTime, ForeignKey, Text, UniqueConstraint, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -12,6 +12,9 @@ class User(Base):
     password_hash: Mapped[str]=mapped_column(String(256))
     role: Mapped[str]=mapped_column(String(20), default='customer')
     status: Mapped[str]=mapped_column(String(20), default='active')
+    contact_phone: Mapped[str|None]=mapped_column(String(40), nullable=True)
+    contact_whatsapp: Mapped[str|None]=mapped_column(String(40), nullable=True)
+    contact_public: Mapped[bool]=mapped_column(Boolean, default=False)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 class Application(Base):
     __tablename__='applications'
@@ -32,6 +35,10 @@ class Product(Base):
     affiliate_rate: Mapped[float]=mapped_column(Numeric(5,2), default=10.0)
     platform_rate: Mapped[float]=mapped_column(Numeric(5,2), default=5.0)
     status: Mapped[str]=mapped_column(String(20), default='active')
+    deleted_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    deleted_by_role: Mapped[str|None]=mapped_column(String(20), nullable=True)
+    deleted_reason: Mapped[str]=mapped_column(Text, default='')
     product_type: Mapped[str]=mapped_column(String(40), default='other')
     size_system: Mapped[str]=mapped_column(String(20), default='none')
     has_variants: Mapped[bool]=mapped_column(default=False)
@@ -186,4 +193,60 @@ class CommissionChangeRequest(Base):
     affected_user_id: Mapped[int]=mapped_column(ForeignKey('users.id'))
     status: Mapped[str]=mapped_column(String(30), default='pending')
     accepted_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+
+class AffiliateProductExclusion(Base):
+    __tablename__='affiliate_product_exclusions'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    affiliate_id: Mapped[int]=mapped_column(ForeignKey('users.id'), index=True)
+    product_id: Mapped[int]=mapped_column(ForeignKey('products.id', ondelete='CASCADE'), index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+    __table_args__=(UniqueConstraint('affiliate_id','product_id'),)
+
+class ProductAuditEvent(Base):
+    __tablename__='product_audit_events'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    product_id: Mapped[int]=mapped_column(ForeignKey('products.id'), index=True)
+    actor_user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    action: Mapped[str]=mapped_column(String(40))
+    details: Mapped[dict]=mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+class ContractRequest(Base):
+    __tablename__='contract_requests'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    user_id: Mapped[int]=mapped_column(ForeignKey('users.id'), index=True)
+    requested_type: Mapped[str]=mapped_column(String(32))
+    title: Mapped[str]=mapped_column(String(180))
+    details: Mapped[str]=mapped_column(Text)
+    desired_commission: Mapped[float|None]=mapped_column(Numeric(5,2), nullable=True)
+    status: Mapped[str]=mapped_column(String(20), default='pending', index=True)
+    admin_note: Mapped[str]=mapped_column(Text, default='')
+    reviewed_by: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    reviewed_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+class ContractNegotiation(Base):
+    __tablename__='contract_negotiations'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    contract_id: Mapped[int]=mapped_column(ForeignKey('contracts.id'), index=True)
+    proposer_id: Mapped[int]=mapped_column(ForeignKey('users.id'), index=True)
+    recipient_id: Mapped[int]=mapped_column(ForeignKey('users.id'), index=True)
+    parent_id: Mapped[int|None]=mapped_column(ForeignKey('contract_negotiations.id'), nullable=True)
+    proposal_text: Mapped[str]=mapped_column(Text)
+    reason: Mapped[str]=mapped_column(Text, default='')
+    response_text: Mapped[str]=mapped_column(Text, default='')
+    status: Mapped[str]=mapped_column(String(20), default='pending', index=True)
+    responded_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+class Notification(Base):
+    __tablename__='notifications'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    user_id: Mapped[int]=mapped_column(ForeignKey('users.id'), index=True)
+    title: Mapped[str]=mapped_column(String(180))
+    body: Mapped[str]=mapped_column(Text, default='')
+    target_url: Mapped[str]=mapped_column(String(500), default='')
+    read_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
