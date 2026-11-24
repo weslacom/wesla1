@@ -23,9 +23,9 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'id="loginForm"' in admin_page.text
     assert 'وِصلة | منصة التسويق بالعمولة' not in admin_page.text
     assert 'no-store' in admin_page.headers.get('cache-control','')
-    # The dedicated admin origin must call the main API cross-origin and retain its secure session cookie.
-    assert "https://wesla-web-production.up.railway.app" in admin_page.text
-    assert "credentials:'include'" in admin_page.text
+    # The separate admin portal must use its same-origin proxy; it must not call the API cross-origin.
+    assert "API_BASE_RAW=window.WESLA_API_BASE||''" in admin_page.text
+    assert 'wesla-web-production.up.railway.app' not in admin_page.text
     preflight=client.options('/api/admin/overview',headers={'Origin':'https://wesla-admin-production.up.railway.app','Access-Control-Request-Method':'GET','Access-Control-Request-Headers':'content-type'})
     assert preflight.status_code==200
     assert preflight.headers.get('access-control-allow-origin')=='https://wesla-admin-production.up.railway.app'
