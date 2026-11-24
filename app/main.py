@@ -47,13 +47,14 @@ def product_out(p,db):
       'product_type':p.product_type,'size_system':p.size_system,'has_variants':p.has_variants,
       'variants':[{'id':v.id,'color':v.color,'size':v.size_label,'size_system':v.size_system,'stock':v.stock,'price':v.price_override,'foot_length_cm':v.foot_length_cm} for v in variants],
       'images':[{'id':im.id,'path':im.storage_path,'primary':im.is_primary} for im in images],
-      'size_guide':[{'label':g.label,'measurements':json.loads(g.measurements or '{}')} for g in guide]}
+      'size_guide':[{'label':g.label,'measurements':g.measurements if isinstance(g.measurements,dict) else json.loads(g.measurements or '{}')} for g in guide]}
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
 class AdminPasswordChange(BaseModel): current_password:str; new_password:str=Field(min_length=10,max_length=128)
 class ApplicationIn(BaseModel): role:str; details:str=''
 class VariantIn(BaseModel):
+    id:int|None=None
     color:str=''
     size:str=''
     size_system:str='none'
@@ -146,11 +147,35 @@ def add_product(data:ProductIn,user:User=Depends(require_role('merchant','admin'
     db.add(p); db.flush()
     for v in data.variants:
         db.add(ProductVariant(product_id=p.id,color=v.color.strip(),size_label=v.size.strip(),size_system=v.size_system,stock=v.stock,price_override=v.price,foot_length_cm=v.foot_length_cm))
-    if data.size_guide: db.add(ProductSizeGuide(product_id=p.id,label='دليل المقاسات',measurements=json.dumps(data.size_guide,ensure_ascii=False)))
+    if data.size_guide: db.add(ProductSizeGuide(product_id=p.id,label='دليل المقاسات',measurements=data.size_guide))
     db.commit(); db.refresh(p); return product_out(p,db)
 @app.get('/api/merchant/products')
 def my_products(user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     return [product_out(p,db) for p in db.scalars(select(Product).where(Product.merchant_id==user.id)).all()]
+@app.patch('/api/merchant/products/{product_id}/variants')
+def update_product_variants(product_id:int,variants:list[VariantIn],user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
+    p=db.get(Product,product_id)
+    if not p or (user.role!='admin' and p.merchant_id!=user.id): raise HTTPException(404,'المنتج غير موجود')
+    existing=db.scalars(select(ProductVariant).where(ProductVariant.product_id==p.id)).all()
+    keep=set()
+    for data in variants:
+        v=db.get(ProductVariant,data.id) if data.id else None
+        if v and v.product_id!=p.id: raise HTTPException(400,'تركيبة المخزون لا تتبع هذا المنتج')
+        if not v: v=ProductVariant(product_id=p.id); db.add(v)
+        v.color=data.color.strip(); v.size_label=data.size.strip(); v.size_system=data.size_system
+        v.stock=data.stock; v.price_override=data.price; v.foot_length_cm=data.foot_length_cm
+        db.flush(); keep.add(v.id)
+    for v in existing:
+        if v.id not in keep: v.stock=0
+    p.has_variants=bool(variants); p.stock=sum(v.stock for v in db.scalars(select(ProductVariant).where(ProductVariant.product_id==p.id)).all())
+    db.commit(); return product_out(p,db)
+
+@app.get('/api/merchant/products/{product_id}')
+def merchant_product_detail(product_id:int,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
+    p=db.get(Product,product_id)
+    if not p or (user.role!='admin' and p.merchant_id!=user.id): raise HTTPException(404,'المنتج غير موجود')
+    return product_out(p,db)
+
 @app.post('/api/affiliate/links/{product_id}')
 def create_link(product_id:int,user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
     p=db.get(Product,product_id)
