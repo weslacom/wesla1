@@ -8,10 +8,15 @@ from fastapi.middleware.gzip import GZipMiddleware
 app = FastAPI(title="Wesla Admin Portal")
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
+DEFAULT_WESLA_API_BASE = "https://wesla-web-production.up.railway.app"
+
 def upstream_base():
-    value=os.getenv("WESLA_API_BASE","").strip().rstrip("/")
-    if not value:
-        raise HTTPException(status_code=503, detail="لم يتم ضبط رابط خادم وصلة في إعدادات بوابة الإدارة.")
+    # Keep the admin portal usable even if the optional Railway variable was
+    # omitted. An explicit value still takes precedence for custom domains.
+    value = os.getenv("WESLA_API_BASE", "").strip() or DEFAULT_WESLA_API_BASE
+    value = value.rstrip("/")
+    if not value.startswith(("https://", "http://")):
+        raise HTTPException(status_code=503, detail="إعداد رابط الخادم غير صالح؛ يجب أن يبدأ بـ https:// أو http://.")
     return value
 
 @app.get("/")
