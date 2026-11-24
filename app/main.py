@@ -74,7 +74,16 @@ class PayoutIn(BaseModel): amount:float=Field(gt=0); method:str; destination:str
 @app.get('/')
 def home(): return FileResponse('app/static/index.html')
 @app.get('/control')
-def control_page():
+def control_page(request:Request,db:Session=Depends(get_db)):
+    token=request.cookies.get('wesla_session')
+    if token:
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        session=db.scalar(select(AuthSession).where(AuthSession.token_hash==token_hash))
+        if session:
+            expires=session.expires_at.replace(tzinfo=timezone.utc) if session.expires_at.tzinfo is None else session.expires_at
+            account=db.get(User,session.user_id)
+            if expires>=datetime.now(timezone.utc) and account and account.status=='active' and account.role!='admin':
+                return RedirectResponse(url='/',status_code=303)
     return FileResponse('app/static/control.html')
 
 @app.get('/health')
@@ -244,6 +253,11 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
             if v: v.stock+=o.quantity
         o.affiliate_commission=0; o.platform_commission=0
     db.commit(); return {'message':'تم تحديث حالة الطلب'}
+@app.get('/api/admin/users')
+def admin_users(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(User).where(User.status=='active').order_by(User.name.asc())).all()
+    return [{'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status} for u in rows]
+
 @app.get('/api/admin/overview')
 def admin_overview(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     return {'users':db.scalar(select(func.count(User.id))),'products':db.scalar(select(func.count(Product.id))),'orders':db.scalar(select(func.count(Order.id))),'sales':db.scalar(select(func.coalesce(func.sum(Order.total),0)).where(Order.status=='delivered')),'applications':db.scalar(select(func.count(Application.id)).where(Application.status=='pending')),'payouts':db.scalar(select(func.count(Payout.id)).where(Payout.status=='pending'))}
