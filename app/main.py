@@ -892,12 +892,15 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
             if not isinstance(evidence,dict) or details.get('document_hash')!=acceptance.document_hash:
                 continue
             evidence_hash=hashlib.sha256(stable_contract_json(evidence).encode()).hexdigest()
+            accepted_at=acceptance.accepted_at
+            if accepted_at.tzinfo is None:
+                accepted_at=accepted_at.replace(tzinfo=timezone.utc)
             return (hmac.compare_digest(evidence_hash,acceptance.document_hash)
                 and details.get('snapshot_hash')==expected_snapshot_hash
                 and evidence.get('method')=='authenticated_explicit_consent'
                 and evidence.get('user_id')==acceptance.user_id
                 and evidence.get('accepted_name')==acceptance.full_name
-                and evidence.get('accepted_at')==acceptance.accepted_at.isoformat()
+                and evidence.get('accepted_at')==accepted_at.isoformat()
                 and evidence.get('ip_address','')==(acceptance.ip_address or '')
                 and evidence.get('user_agent','')==(acceptance.user_agent or ''))
         return False
