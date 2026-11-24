@@ -166,7 +166,7 @@ class ContractTerminationRequest(Base):
     contract_id: Mapped[int]=mapped_column(ForeignKey('contracts.id', ondelete='CASCADE'), index=True)
     requester_user_id: Mapped[int]=mapped_column(ForeignKey('users.id'))
     reason: Mapped[str]=mapped_column(Text)
-    evidence_paths: Mapped[str]=mapped_column(Text, default='[]')
+    evidence_paths: Mapped[list]=mapped_column(JSON, default=list)
     status: Mapped[str]=mapped_column(String(30), default='under_review')
     decision_reason: Mapped[str|None]=mapped_column(Text, nullable=True)
     decided_by: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
