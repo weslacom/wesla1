@@ -114,7 +114,7 @@ class ContractNegotiationResponseIn(BaseModel):
     response_text:str=Field(default='',max_length=5000)
 
 @app.get('/')
-def home(): return FileResponse('app/static/index.html')
+def home(): return FileResponse('app/static/index.html',headers={'Cache-Control':'public, max-age=60, stale-while-revalidate=300'})
 @app.get('/control')
 def control_page():
     # Once the independent admin portal is deployed, keep its assets off the public site.
@@ -256,17 +256,18 @@ def merchant_product_detail(product_id:int,user:User=Depends(require_role('merch
     return product_out(p,db)
 
 @app.get('/api/public/stores/{user_id}')
-def public_store(user_id:int,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+def public_store(user_id:int,response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
     owner=db.get(User,user_id)
     if not owner or owner.role!='merchant' or owner.status!='active': raise HTTPException(404,'المتجر غير موجود')
     rows=db.scalars(select(Product).where(Product.merchant_id==owner.id,Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
     items=products_out(rows,db)
     for item in items:
         item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
+    response.headers['Cache-Control']='public, max-age=30, stale-while-revalidate=120'
     return {'id':owner.id,'name':owner.name,'products':items,'contact_phone':owner.contact_phone if owner.contact_public else None,'contact_whatsapp':owner.contact_whatsapp if owner.contact_public else None}
 
 @app.get('/api/public/marketers/{user_id}')
-def public_marketer(user_id:int,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
+def public_marketer(user_id:int,response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
     owner=db.get(User,user_id)
     if not owner or owner.role!='affiliate' or owner.status!='active': raise HTTPException(404,'صفحة المسوق غير موجودة')
     excluded=select(AffiliateProductExclusion.product_id).where(AffiliateProductExclusion.affiliate_id==owner.id)
@@ -278,6 +279,7 @@ def public_marketer(user_id:int,limit:int=Query(default=48,ge=1,le=100),offset:i
     for item in products:
         link=links_by_product[item['id']]
         item['referral_url']=f"/r/{link.code}"; item['clicks']=link.clicks
+    response.headers['Cache-Control']='public, max-age=30, stale-while-revalidate=120'
     return {'id':owner.id,'name':owner.name,'products':products,'contact_phone':owner.contact_phone if owner.contact_public else None,'contact_whatsapp':owner.contact_whatsapp if owner.contact_public else None}
 
 @app.get('/store/{user_id}')
