@@ -323,7 +323,7 @@ class CommissionChangeIn(BaseModel):
     affected_user_id:int
 
 def contract_event(db,c,actor,event,details=None):
-    db.add(ContractEvent(contract_id=c.id,actor_user_id=actor.id if actor else None,event_type=event,details=json.dumps(details or {},ensure_ascii=False)))
+    db.add(ContractEvent(contract_id=c.id,actor_user_id=actor.id if actor else None,event_type=event,details=details or {}))
 
 def contract_party_ids(c):
     ids=[]
