@@ -197,11 +197,35 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert client.get('/api/admin/negotiations').status_code==200
     assert client.get(f'/store/{merchant_id}').status_code==200
     assert client.get(f'/marketer/{affiliate_id}').status_code==200
+    import app.admin_portal as admin_portal_module
     from app.admin_portal import app as admin_portal_app
     admin_portal_client=TestClient(admin_portal_app)
     portal_html=admin_portal_client.get('/')
     assert portal_html.status_code==200
     assert "API_BASE_RAW=window.WESLA_API_BASE||''" in portal_html.text
     assert 'wesla-web-production.up.railway.app' not in portal_html.text
-    assert admin_portal_client.get('/health').json()['service']=='wesla-admin-portal'
+
+    # The independent admin service must proxy API requests to the main API,
+    # forward the session cookie, preserve Set-Cookie, and avoid self-proxy loops.
+    import httpx
+    seen={}
+    class FakeAsyncClient:
+        def __init__(self,*args,**kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): return False
+        async def get(self,url):
+            seen['health_url']=url
+            return httpx.Response(200,json={'ok':True})
+        async def request(self,method,url,params=None,content=None,headers=None):
+            seen.update({'method':method,'url':url,'headers':headers or {}})
+            return httpx.Response(200,json={'ok':True},headers=[('set-cookie','wesla_session=one; Path=/; HttpOnly'),('set-cookie','wesla_refresh=two; Path=/; HttpOnly')])
+    monkeypatch.setenv('WESLA_API_BASE','https://wesla-admin-production.up.railway.app')
+    monkeypatch.setattr(admin_portal_module.httpx,'AsyncClient',FakeAsyncClient)
+    health=admin_portal_client.get('/health')
+    assert health.status_code==200 and health.json()['ok'] is True
+    proxied=admin_portal_client.get('/api/admin/overview',cookies={'wesla_session':'test-session'})
+    assert proxied.status_code==200 and proxied.json()['ok'] is True
+    assert seen['url'].startswith('https://wesla-web-production.up.railway.app/api/admin/overview')
+    assert seen['headers'].get('cookie')=='wesla_session=test-session'
+    assert len(proxied.headers.get_list('set-cookie'))==2
 
