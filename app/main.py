@@ -1,4 +1,4 @@
-import os, secrets, hashlib, hmac, json
+import os, secrets, hashlib, hmac, json, base64, binascii
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
@@ -79,6 +79,21 @@ def products_out(rows,db):
 
 def product_out(p,db):
     return products_out([p],db)[0]
+
+def save_product_images(product_id:int,images:list[str],db:Session):
+    if len(images)>4: raise HTTPException(400,'يمكن رفع 4 صور كحد أقصى للمنتج')
+    existing=db.scalar(select(func.count(ProductImage.id)).where(ProductImage.product_id==product_id)) or 0
+    if existing+len(images)>4: raise HTTPException(400,'الحد الأقصى 4 صور للمنتج')
+    for index,data_url in enumerate(images):
+        if not isinstance(data_url,str) or len(data_url)>1_500_000: raise HTTPException(413,'حجم الصورة كبير؛ اختر صورة أصغر')
+        try:
+            header,payload=data_url.split(',',1)
+            mime=header.removeprefix('data:').removesuffix(';base64')
+            if mime not in ('image/jpeg','image/png','image/webp'): raise ValueError('unsupported image')
+            raw=base64.b64decode(payload,validate=True)
+            if not raw or len(raw)>1_000_000: raise ValueError('image too large')
+        except (ValueError,binascii.Error): raise HTTPException(400,'صيغة الصورة غير مدعومة أو حجمها أكبر من 1 ميجابايت')
+        db.add(ProductImage(product_id=product_id,storage_path=data_url,is_primary=(existing==0 and index==0)))
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
@@ -96,7 +111,7 @@ class ProductIn(BaseModel):
     title:str=Field(min_length=2,max_length=180); description:str=''; price:float=Field(gt=0); stock:int=Field(ge=0)
     affiliate_rate:float=Field(ge=0,le=80); platform_rate:float=Field(ge=0,le=30)
     product_type:str='other'; size_system:str='none'; variants:list[VariantIn]=[]
-    size_guide:dict={}
+    size_guide:dict={}; images:list[str]=Field(default_factory=list,max_length=4)
 class OrderIn(BaseModel):
     product_id:int; quantity:int=Field(ge=1,le=20); customer_name:str; customer_phone:str; address:str
     referral_code:str|None=None; variant_id:int|None=None
@@ -233,6 +248,7 @@ def add_product(data:ProductIn,user:User=Depends(require_role('merchant','admin'
     for v in data.variants:
         db.add(ProductVariant(product_id=p.id,color=v.color.strip(),size_label=v.size.strip(),size_system=v.size_system,stock=v.stock,price_override=v.price,foot_length_cm=v.foot_length_cm))
     if data.size_guide: db.add(ProductSizeGuide(product_id=p.id,label='دليل المقاسات',measurements=data.size_guide))
+    save_product_images(p.id,data.images,db)
     db.commit(); db.refresh(p); return product_out(p,db)
 @app.get('/api/merchant/products')
 def my_products(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
