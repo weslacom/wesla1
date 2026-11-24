@@ -864,7 +864,11 @@ def accept_contract(contract_id:int,data:ContractDecision,request:Request,user:U
     elif all_parties_signed and c.contract_type in ('platform_merchant','platform_affiliate'):
         contract_event(db,c,user,'parties_signed_waiting_admin',{'snapshot_hash':snapshot_hash,'party_ids':required})
     db.commit()
-    message='تم تسجيل موافقتك الإلكترونية. بانتظار اعتماد ممثل الإدارة.' if all_parties_signed and c.contract_type in ('platform_merchant','platform_affiliate') e@app.get('/api/contracts/{contract_id}/document')
+    message='تم تسجيل موافقتك الإلكترونية. بانتظار اعتماد ممثل الإدارة.' if all_parties_signed and c.contract_type in ('platform_merchant','platform_affiliate') else 'تم تسجيل موافقتك الإلكترونية.'
+    return {'message':message,'status':c.status,'document_hash':digest,'snapshot_hash':snapshot_hash}
+
+
+@app.get('/api/contracts/{contract_id}/document')
 def contract_document(contract_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
     c=db.get(Contract,contract_id)
     if not c or not can_view_contract(c,user): raise HTTPException(404,'العقد غير موجود')
