@@ -517,6 +517,118 @@ def contract_out(c,db):
       'acceptances':[{'user_id':a.user_id,'full_name':a.full_name,'accepted_at':a.accepted_at.isoformat(),'document_hash':a.document_hash} for a in accepts],
       'events':[{'event':e.event_type,'details':e.details if isinstance(e.details,dict) else (json.loads(e.details) if isinstance(e.details,str) and e.details else {}),'created_at':e.created_at.isoformat()} for e in events]}
 
+CONTRACT_ACKNOWLEDGEMENT="""إقرار بالموافقة والالتزام
+أقرّ أنا الطرف الموقّع أدناه بأنني اطّلعت على جميع بنود هذه الاتفاقية وشروطها، وفهمت مضمونها وآثارها، وأوافق عليها بإرادتي الحرة ورضاي التام، وأتعهد بالالتزام بما ورد فيها من حقوق والتزامات.
+وتُعد موافقتي المثبتة إلكترونيًا دليلًا على قبولي والتزامي بهذه البنود، وتكون حجةً بين أطراف الاتفاقية في الحدود التي يقررها القانون المصري ومتى ثبتت صحة نسبتها إلى صاحبها.
+(والله شاهدٌ علينا)"""
+
+def ensure_contract_ack(body:str)->str:
+    if 'والله شاهد' in (body or ''): return body
+    return (body or '').rstrip()+'\\n\\n'+CONTRACT_ACKNOWLEDGEMENT
+
+def contract_request_out(row,owner):
+    return {'id':row.id,'requested_type':row.requested_type,'title':row.title,'details':row.details,'desired_commission':row.desired_commission,'status':row.status,'admin_note':row.admin_note,'created_at':row.created_at.isoformat(),'user_id':owner.id,'user_name':owner.name,'user_email':owner.email}
+
+@app.post('/api/contracts/request')
+def request_platform_contract(data:ContractRequestIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if user.role not in ('merchant','affiliate'):
+        raise HTTPException(403,'طلب التعاقد مع المنصة متاح للتاجر والمسوق فقط')
+    requested_type='platform_merchant' if user.role=='merchant' else 'platform_affiliate'
+    pending=db.scalar(select(ContractRequest).where(ContractRequest.user_id==user.id,ContractRequest.status=='pending'))
+    if pending: raise HTTPException(409,'لديك طلب تعاقد قيد المراجعة بالفعل')
+    row=ContractRequest(user_id=user.id,requested_type=requested_type,title=data.title.strip(),details=data.details.strip(),desired_commission=data.desired_commission)
+    db.add(row)
+    admins=db.scalars(select(User).where(User.role=='admin',User.status=='active')).all()
+    for admin in admins: notify_user(db,admin.id,'طلب تعاقد جديد',f'{user.name} أرسل طلب تعاقد: {data.title}','/control')
+    db.commit()
+    return {'message':'تم إرسال طلب التعاقد إلى إدارة وصلة','request_id':row.id}
+
+@app.get('/api/contracts/requests/my')
+def my_contract_requests(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(ContractRequest).where(ContractRequest.user_id==user.id).order_by(ContractRequest.created_at.desc()).limit(50)).all()
+    return [{'id':x.id,'title':x.title,'status':x.status,'admin_note':x.admin_note,'created_at':x.created_at.isoformat()} for x in rows]
+
+@app.get('/api/admin/contract-requests')
+def admin_contract_requests(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(select(ContractRequest,User).join(User,User.id==ContractRequest.user_id).order_by(ContractRequest.created_at.desc()).limit(200)).all()
+    return [contract_request_out(row,owner) for row,owner in rows]
+
+@app.post('/api/admin/contract-requests/{request_id}/decision')
+def decide_contract_request(request_id:int,data:ContractRequestDecision,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    row=db.get(ContractRequest,request_id)
+    if not row or row.status!='pending': raise HTTPException(404,'طلب التعاقد غير موجود أو تمت مراجعته')
+    if data.decision not in ('approve','reject'): raise HTTPException(400,'القرار غير صحيح')
+    owner=db.get(User,row.user_id)
+    row.status='approved' if data.decision=='approve' else 'rejected'
+    row.admin_note=data.admin_note.strip(); row.reviewed_by=user.id; row.reviewed_at=datetime.now(timezone.utc)
+    contract_id=None
+    if data.decision=='approve':
+        contract=Contract(contract_type=row.requested_type,title=row.title,body=ensure_contract_ack(row.details),merchant_id=owner.id if owner.role=='merchant' else None,affiliate_id=owner.id if owner.role=='affiliate' else None,commission_rate=row.desired_commission,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),legal_entity_name=owner.name,commission_scope='contract',platform_signer_name='WESLA | المنصة')
+        db.add(contract); db.flush(); contract_event(db,contract,user,'created_from_request',{'request_id':row.id}); contract_id=contract.id
+    notify_user(db,owner.id,'تحديث طلب التعاقد',('تمت الموافقة على طلبك وإنشاء مسودة اتفاقية' if data.decision=='approve' else 'تم رفض طلب التعاقد')+ (': '+row.admin_note if row.admin_note else ''),'/')
+    db.commit()
+    return {'message':'تمت مراجعة طلب التعاقد','status':row.status,'contract_id':contract_id}
+
+@app.post('/api/contracts/{contract_id}/negotiations')
+def create_contract_negotiation(contract_id:int,data:ContractNegotiationIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    contract=db.get(Contract,contract_id)
+    if not contract or not can_view_contract(contract,user) or contract.status in ('archived','terminated'):
+        raise HTTPException(404,'الاتفاقية غير متاحة للتفاوض')
+    if user.role=='admin':
+        recipient_id=data.recipient_user_id
+        if not recipient_id or recipient_id not in contract_party_ids(contract): raise HTTPException(400,'حدد الطرف المستلم للمقترح')
+    elif contract.contract_type=='merchant_affiliate':
+        recipient_id=contract.affiliate_id if user.id==contract.merchant_id else contract.merchant_id
+    else:
+        recipient_id=db.scalar(select(User.id).where(User.role=='admin',User.status=='active').order_by(User.id).limit(1))
+    if not recipient_id or recipient_id==user.id: raise HTTPException(400,'تعذر تحديد الطرف الآخر في الاتفاقية')
+    recipient=db.get(User,recipient_id)
+    if not recipient: raise HTTPException(404,'الطرف المستلم غير موجود')
+    negotiation=ContractNegotiation(contract_id=contract.id,proposer_id=user.id,recipient_id=recipient.id,proposal_text=data.proposal_text.strip(),reason=data.reason.strip())
+    db.add(negotiation)
+    notify_user(db,recipient.id,'مقترح تفاوض على اتفاقية',f'{user.name} أرسل مقترحًا على الاتفاقية {contract.contract_number}',f'/')
+    db.commit(); db.refresh(negotiation)
+    return {'message':'تم إرسال المقترح للطرف الآخر','negotiation_id':negotiation.id,'status':negotiation.status}
+
+@app.get('/api/contracts/{contract_id}/negotiations')
+def list_contract_negotiations(contract_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    contract=db.get(Contract,contract_id)
+    if not contract or not can_view_contract(contract,user): raise HTTPException(404,'الاتفاقية غير موجودة')
+    rows=db.scalars(select(ContractNegotiation).where(ContractNegotiation.contract_id==contract.id).order_by(ContractNegotiation.created_at.asc()).limit(200)).all()
+    return [{'id':n.id,'proposer_id':n.proposer_id,'recipient_id':n.recipient_id,'proposal_text':n.proposal_text,'reason':n.reason,'response_text':n.response_text,'status':n.status,'parent_id':n.parent_id,'created_at':n.created_at.isoformat()} for n in rows]
+
+@app.post('/api/contract-negotiations/{negotiation_id}/respond')
+def respond_contract_negotiation(negotiation_id:int,data:ContractNegotiationResponseIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    row=db.get(ContractNegotiation,negotiation_id)
+    if not row or row.status!='pending': raise HTTPException(404,'مقترح التفاوض غير موجود أو تمت مراجعته')
+    if user.id!=row.recipient_id and user.role!='admin': raise HTTPException(403,'هذا المقترح ليس موجّهًا لحسابك')
+    if data.decision not in ('accept','reject','counter'): raise HTTPException(400,'قرار التفاوض غير صحيح')
+    if data.decision in ('reject','counter') and len(data.response_text.strip())<5: raise HTTPException(400,'اكتب ردًا أو صياغة بديلة واضحة')
+    row.response_text=data.response_text.strip(); row.status={'accept':'accepted','reject':'rejected','counter':'countered'}[data.decision]; row.responded_at=datetime.now(timezone.utc)
+    new_contract_id=None
+    if data.decision=='counter':
+        counter=ContractNegotiation(contract_id=row.contract_id,proposer_id=user.id,recipient_id=row.proposer_id,parent_id=row.id,proposal_text=data.response_text.strip(),reason='صياغة بديلة مقدمة ردًا على المقترح')
+        db.add(counter); notify_user(db,row.proposer_id,'تم تقديم صياغة تفاوضية بديلة',f'يوجد رد بديل على المقترح رقم {row.id}','/')
+    elif data.decision=='accept':
+        original=db.get(Contract,row.contract_id)
+        next_version=original.version+1
+        number=f'{original.contract_number}-V{next_version}'
+        revised_body=ensure_contract_ack(original.body+'\\n\\nبند مضاف نتيجة التفاوض\\n'+row.proposal_text)
+        revised=Contract(contract_type=original.contract_type,title=f'{original.title} — الإصدار {next_version}',body=revised_body,merchant_id=original.merchant_id,affiliate_id=original.affiliate_id,commission_rate=original.commission_rate,penalty_terms=original.penalty_terms,status='draft',contract_number=number,starts_at=original.starts_at,ends_at=original.ends_at,version=next_version,platform_signer_name=original.platform_signer_name,legal_entity_name=original.legal_entity_name,commission_scope=original.commission_scope,penalty_type=original.penalty_type,penalty_amount=original.penalty_amount,penalty_percent=original.penalty_percent,termination_terms=original.termination_terms)
+        db.add(revised); db.flush(); new_contract_id=revised.id
+        contract_event(db,original,user,'negotiation_accepted_new_version',{'negotiation_id':row.id,'new_contract_id':new_contract_id,'version':next_version})
+        contract_event(db,revised,user,'created_from_negotiation',{'source_contract_id':original.id,'negotiation_id':row.id})
+        for party_id in contract_party_ids(original): notify_user(db,party_id,'تم قبول مقترح التفاوض','تم إنشاء إصدار جديد كمسودة، ويجب على الأطراف مراجعته وتوقيعه من جديد','/')
+    else:
+        notify_user(db,row.proposer_id,'تم رفض مقترح التفاوض',data.response_text.strip(),'/')
+    db.commit()
+    return {'message':'تم تسجيل الرد على المقترح','status':row.status,'new_contract_id':new_contract_id}
+
+@app.get('/api/contracts/negotiations/my')
+def my_contract_negotiations(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(ContractNegotiation).where((ContractNegotiation.proposer_id==user.id)|(ContractNegotiation.recipient_id==user.id)).order_by(ContractNegotiation.created_at.desc()).limit(100)).all()
+    return [{'id':n.id,'contract_id':n.contract_id,'proposer_id':n.proposer_id,'recipient_id':n.recipient_id,'proposal_text':n.proposal_text,'response_text':n.response_text,'status':n.status,'created_at':n.created_at.isoformat()} for n in rows]
+
 @app.get('/api/contracts/my')
 def my_contracts(user:User=Depends(current_user),db:Session=Depends(get_db)):
     rows=db.scalars(select(Contract).order_by(Contract.created_at.desc())).all()
