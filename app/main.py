@@ -398,15 +398,15 @@ def affiliate_dashboard(user:User=Depends(require_role('affiliate','admin')),db:
     return {'links':[{'code':r.code,'product_id':r.product_id,'product':r.title,'clicks':r.clicks} for r in links],'orders':[{'order_number':o.order_number,'total':o.total,'commission':o.affiliate_commission,'status':o.status} for o in orders],'pending':round(float(pending),2),'approved':round(float(approved),2)}
 @app.post('/api/affiliate/payouts')
 def payout(data:PayoutIn,user:User=Depends(require_role('affiliate','admin')),db:Session=Depends(get_db)):
-    delivered=db.scalars(select(Order).where(Order.affiliate_id==user.id,Order.status=='delivered')).all(); earned=sum(o.affiliate_commission for o in delivered)
-    paid=sum(x.amount for x in db.scalars(select(Payout).where(Payout.affiliate_id==user.id,Payout.status.in_(['approved','paid']))).all())
-    pending=sum(x.amount for x in db.scalars(select(Payout).where(Payout.affiliate_id==user.id,Payout.status=='pending')).all())
+    earned=db.scalar(select(func.coalesce(func.sum(Order.affiliate_commission),0)).where(Order.affiliate_id==user.id,Order.status=='delivered')) or 0
+    paid=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.affiliate_id==user.id,Payout.status.in_(['approved','paid']))) or 0
+    pending=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.affiliate_id==user.id,Payout.status=='pending')) or 0
     if Decimal(str(data.amount))>Decimal(str(earned))-Decimal(str(paid))-Decimal(str(pending)): raise HTTPException(400,'المبلغ يتجاوز رصيدك القابل للسحب')
     p=Payout(affiliate_id=user.id,amount=Decimal(str(data.amount)),method=data.method,destination=data.destination); db.add(p); db.commit(); return {'message':'تم إرسال طلب السحب للإدارة'}
 @app.get('/api/merchant/orders')
-def merchant_orders(user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
-    rows=db.scalars(select(Order).where(Order.merchant_id==user.id).order_by(Order.created_at.desc())).all()
-    return [{'order_number':o.order_number,'customer_name':o.customer_name,'customer_phone':o.customer_phone,'address':o.address,'product':db.get(Product,o.product_id).title,'quantity':o.quantity,'color':o.selected_color,'size':o.selected_size,'total':o.total,'status':o.status} for o in rows]
+def merchant_orders(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
+    rows=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.merchant_id==user.id).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
+    return [{'order_number':o.order_number,'customer_name':o.customer_name,'customer_phone':o.customer_phone,'address':o.address,'product':title,'quantity':o.quantity,'color':o.selected_color,'size':o.selected_size,'total':o.total,'status':o.status} for o,title in rows]
 @app.post('/api/merchant/orders/{order_number}/status')
 def update_order(order_number:str,status:str,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     if status not in ('confirmed','shipped','delivered','cancelled','returned'): raise HTTPException(400,'حالة الطلب غير صحيحة')
@@ -422,8 +422,8 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
         o.affiliate_commission=0; o.platform_commission=0
     db.commit(); return {'message':'تم تحديث حالة الطلب'}
 @app.get('/api/admin/users')
-def admin_users(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    rows=db.scalars(select(User).where(User.status=='active').order_by(User.name.asc())).all()
+def admin_users(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(User).where(User.status=='active').order_by(User.name.asc()).limit(limit).offset(offset)).all()
     return [{'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status} for u in rows]
 
 @app.get('/api/admin/overview')
@@ -431,7 +431,8 @@ def admin_overview(user:User=Depends(require_role('admin')),db:Session=Depends(g
     return {'users':db.scalar(select(func.count(User.id))),'products':db.scalar(select(func.count(Product.id))),'orders':db.scalar(select(func.count(Order.id))),'sales':db.scalar(select(func.coalesce(func.sum(Order.total),0)).where(Order.status=='delivered')),'applications':db.scalar(select(func.count(Application.id)).where(Application.status=='pending')),'payouts':db.scalar(select(func.count(Payout.id)).where(Payout.status=='pending'))}
 @app.get('/api/admin/applications')
 def admin_applications(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    return [{'id':a.id,'name':db.get(User,a.user_id).name,'email':db.get(User,a.user_id).email,'role':a.requested_role,'details':a.details,'status':a.status} for a in db.scalars(select(Application).where(Application.status=='pending')).all()]
+    rows=db.execute(select(Application,User).join(User,User.id==Application.user_id).where(Application.status=='pending').order_by(Application.created_at.desc()).limit(200)).all()
+    return [{'id':a.id,'name':owner.name,'email':owner.email,'role':a.requested_role,'details':a.details,'status':a.status} for a,owner in rows]
 @app.post('/api/admin/applications/{app_id}/{decision}')
 def decide_application(app_id:int,decision:str,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if decision not in ('approve','reject'): raise HTTPException(400,'القرار غير صحيح')
@@ -441,11 +442,13 @@ def decide_application(app_id:int,decision:str,user:User=Depends(require_role('a
     if decision=='approve': db.get(User,a.user_id).role=a.requested_role
     db.commit(); return {'message':'تمت مراجعة الطلب'}
 @app.get('/api/admin/orders')
-def admin_orders(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    return [{'order_number':o.order_number,'customer':o.customer_name,'total':o.total,'affiliate_commission':o.affiliate_commission,'platform_commission':o.platform_commission,'status':o.status} for o in db.scalars(select(Order).order_by(Order.created_at.desc())).all()]
+def admin_orders(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Order).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
+    return [{'order_number':o.order_number,'customer':o.customer_name,'total':o.total,'affiliate_commission':o.affiliate_commission,'platform_commission':o.platform_commission,'status':o.status} for o in rows]
 @app.get('/api/admin/payouts')
-def admin_payouts(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    return [{'id':p.id,'affiliate':db.get(User,p.affiliate_id).name,'amount':p.amount,'method':p.method,'destination':p.destination,'status':p.status} for p in db.scalars(select(Payout).where(Payout.status=='pending')).all()]
+def admin_payouts(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(select(Payout,User.name).join(User,User.id==Payout.affiliate_id).where(Payout.status=='pending').order_by(Payout.created_at.desc()).limit(limit).offset(offset)).all()
+    return [{'id':p.id,'affiliate':name,'amount':p.amount,'method':p.method,'destination':p.destination,'status':p.status} for p,name in rows]
 @app.post('/api/admin/payouts/{payout_id}/{decision}')
 def decide_payout(payout_id:int,decision:str,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if decision not in ('approve','reject','paid'): raise HTTPException(400,'القرار غير صحيح')
