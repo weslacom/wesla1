@@ -3,8 +3,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, Response
-from .realtime_config import inject_realtime_config
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 
 app = FastAPI(title="Wesla Admin Portal")
@@ -41,7 +40,6 @@ def upstream_base(request: Request | None = None) -> str:
 @app.get("/")
 def admin_home():
     html = Path("app/static/control.html").read_text(encoding="utf-8")
-    html = inject_realtime_config(html)
     # API calls stay same-origin and are securely proxied by this service.
     html = html.replace(
         "<script>",
@@ -85,6 +83,30 @@ async def proxy_api(path: str, request: Request):
         value = request.headers.get(name)
         if value:
             headers[name] = value
+    # SSE must be streamed end-to-end; buffering it in the normal JSON proxy
+    # would prevent the independent admin portal from receiving live events.
+    if path == "admin/events" and request.method == "GET":
+        client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8.0), follow_redirects=False)
+        context = client.stream("GET", target, params=request.query_params, headers=headers)
+        try:
+            upstream = await context.__aenter__()
+        except httpx.HTTPError:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail="تعذر فتح قناة التحديثات المباشرة.")
+        if upstream.status_code >= 400:
+            body = await upstream.aread()
+            content_type = upstream.headers.get("content-type", "application/json")
+            await context.__aexit__(None, None, None)
+            await client.aclose()
+            return Response(content=body, status_code=upstream.status_code, headers={"content-type": content_type, "cache-control": "no-store"})
+        async def stream_upstream():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await context.__aexit__(None, None, None)
+                await client.aclose()
+        return StreamingResponse(stream_upstream(), status_code=upstream.status_code, media_type="text/event-stream", headers={"cache-control": "no-cache, no-store", "x-accel-buffering": "no", "content-encoding": "identity"})
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=8.0), follow_redirects=False) as client:
             upstream = await client.request(
