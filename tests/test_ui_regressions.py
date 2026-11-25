@@ -6,7 +6,6 @@ def test_public_page_features_are_present_and_product_loader_is_async():
     assert 'id="accountSettings"' in html
     assert 'id="accountActions"' in html
     assert html.count('async function loadProducts()') == 1
-    assert "function loadProducts(){try{let ps=await" not in html
     assert "async function merchantProduct()" in html
     assert "function merchantProduct(){" not in html
     assert "#tabs{position:fixed" in html
