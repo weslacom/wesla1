@@ -5,6 +5,19 @@ import os
 import psycopg
 
 
+def listen_dsn() -> str:
+    """Use an explicit listener DSN when provided; LISTEN requires session pooling."""
+    dsn = os.getenv("LISTEN_DATABASE_URL") or os.getenv("DATABASE_URL", "")
+    dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+    if dsn.startswith("postgres://"):
+        dsn = dsn.replace("postgres://", "postgresql://", 1)
+    # Supabase transaction pooler (6543) cannot keep LISTEN subscriptions.
+    # Its session-pooler endpoint uses the same host/credentials on port 5432.
+    if ".pooler.supabase.com" in dsn and ":6543/" in dsn:
+        dsn = dsn.replace(":6543/", ":5432/", 1)
+    return dsn
+
+
 class PostgresEventHub:
     """One LISTEN connection per app process, fan-out to all local SSE clients."""
 
@@ -41,10 +54,7 @@ class PostgresEventHub:
                 pass
 
     async def _listen(self):
-        dsn = os.getenv("DATABASE_URL", "")
-        dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
-        if dsn.startswith("postgres://"):
-            dsn = dsn.replace("postgres://", "postgresql://", 1)
+        dsn = listen_dsn()
         if not dsn or dsn.startswith("sqlite:"):
             return
         delay = 1
