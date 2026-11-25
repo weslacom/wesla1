@@ -13,7 +13,10 @@ from .database import Base, engine, get_db, SessionLocal
 from .event_hub import event_hub
 from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement
 
-Base.metadata.create_all(bind=engine)
+# Production schema is managed by Supabase migrations. Vercel instances are ephemeral.
+# Keep automatic schema creation for local development and isolated tests only.
+if os.getenv('VERCEL') != '1':
+    Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
 
 @app.on_event('startup')
