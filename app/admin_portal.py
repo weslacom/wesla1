@@ -27,8 +27,13 @@ def upstream_base(request: Request | None = None) -> str:
     if value.endswith("/api"):
         value = value[:-4]
     parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        raise HTTPException(status_code=503, detail="إعداد رابط خادم وصلة الأساسي غير صحيح.")
+    # Prefer Railway private networking when configured. Plain HTTP is accepted
+    # only for Railway's private DNS suffix; public upstreams must always use HTTPS.
+    private_railway = parsed.scheme == "http" and bool(parsed.hostname) and parsed.hostname.endswith(".railway.internal")
+    public_https = parsed.scheme == "https" and bool(parsed.hostname)
+    if not (private_railway or public_https) or parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise HTTPException(status_code=503, detail="إعداد رابط خادم وصلة الأساسي غير صحيح. استخدم HTTPS أو عنوان Railway داخلي.")
+
     return value
 
 
@@ -94,6 +99,9 @@ async def proxy_api(path: str, request: Request):
         value = upstream.headers.get(name)
         if value:
             out_headers[name] = value
+    # Admin data is always live data; do not let browser/proxy caches serve stale
+    # dashboards after a successful write from either application.
+    out_headers.setdefault("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
     response = Response(content=upstream.content, status_code=upstream.status_code, headers=out_headers)
     for cookie in upstream.headers.get_list("set-cookie"):
         response.headers.append("set-cookie", cookie)
