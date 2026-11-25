@@ -53,9 +53,8 @@ function openAccountSettings(){if(!me)return;$('#accountSettings').classList.rem
 async function loadAnnouncements(){try{const rows=await api('/api/announcements/active');const host=$('#announcementBanner');if(!rows.length){host.classList.add('hidden');host.innerHTML='';return}host.classList.remove('hidden');host.innerHTML=rows.map(a=>'<article class="announcement-card"><div><b>📣 '+esc(a.title)+'</b><p>'+esc(a.body)+'</p></div>'+(a.target_url&&a.button_label?'<a href="'+escAttr(a.target_url)+'">'+esc(a.button_label)+'</a>':'')+'</article>').join('')}catch(e){console.warn('announcement feed unavailable',e)}}
 $('#orderForm').onsubmit=submitOrder;$('#trackOrderForm').onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.target));try{let x=await api('/api/orders/track',{method:'POST',body:JSON.stringify(d)});$('#trackOrderResult').innerHTML='<div class="notice">الطلب '+esc(x.order_number)+' — '+esc(x.product)+'<br>الحالة: <b>'+esc(x.status_label)+'</b><br>الإجمالي: '+x.total+' جنيه</div>'}catch(x){$('#trackOrderResult').textContent=x.message}};if(location.pathname.startsWith('/store/'))loadPublicProfile('store');else if(location.pathname.startsWith('/marketer/'))loadPublicProfile('marketer');else loadProducts();loadAnnouncements();boot();
 </script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-// Supabase Broadcast pushes sanitized database-change notices to public catalogue clients.
+// Native PostgreSQL notifications arrive through an SSE stream; reconnects are automatic.
 (() => {
   let refreshing = false;
   let refreshPending = false;
@@ -80,30 +79,22 @@ $('#orderForm').onsubmit=submitOrder;$('#trackOrderForm').onsubmit=async e=>{e.p
       else if (typeof loadProducts === "function") jobs.push(loadProducts());
       if (typeof loadAnnouncements === "function") jobs.push(loadAnnouncements());
       await Promise.allSettled(jobs);
-    } finally {
-      refreshing = false;
-    }
+    } finally { refreshing = false; }
   };
-  const supabaseFactory = window.supabase && window.supabase.createClient;
-  if (supabaseFactory && window.WESLA_SUPABASE_URL && window.WESLA_SUPABASE_ANON_KEY) {
+  const stream = new EventSource("/api/public/events");
+  stream.onmessage = event => {
     try {
-      const client = supabaseFactory(window.WESLA_SUPABASE_URL, window.WESLA_SUPABASE_ANON_KEY, {
-        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
-      });
-      const channel = client.channel("wesla:updates", { config: { private: true } })
-        .on("broadcast", { event: "wesla_change" }, message => {
-          const data = message && (message.payload || message);
-          if (data && ["products", "product_variants", "product_images", "announcements", "site_settings"].includes(data.table)) {
-            refreshPending = true;
-            void refreshPublicContent();
-          }
-        })
-        .subscribe(status => { window.WESLA_REALTIME_STATUS = status; });
-      window.addEventListener("beforeunload", () => { void client.removeChannel(channel); });
-    } catch (error) { console.warn("Wesla realtime subscription unavailable", error); }
-  }
+      const data = JSON.parse(event.data);
+      if (["products", "product_variants", "product_images", "announcements", "site_settings"].includes(data.table)) {
+        refreshPending = true;
+        void refreshPublicContent();
+      }
+    } catch (error) { console.warn("Invalid Wesla update event", error); }
+  };
+  stream.onerror = () => { window.WESLA_REALTIME_STATUS = "reconnecting"; };
   window.setInterval(() => { refreshPending = true; void refreshPublicContent(); }, 60000);
   window.setInterval(() => { void refreshPublicContent(); }, 4000);
+  window.addEventListener("beforeunload", () => stream.close());
 })();
 </script>
 </body></html>
