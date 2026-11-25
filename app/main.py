@@ -617,11 +617,11 @@ def decide_payout(payout_id:int,decision:str,user:User=Depends(require_role('adm
 class ContractIn(BaseModel):
     contract_type:str
     title:str=Field(min_length=3,max_length=180)
-    body:str=Field(min_length=20)
+    body:str=Field(min_length=20,max_length=1800)
     merchant_id:int|None=None
     affiliate_id:int|None=None
     commission_rate:float|None=Field(default=None,ge=0,le=100)
-    penalty_terms:str=''
+    penalty_terms:str=Field(default='',max_length=400)
     starts_at:datetime|None=None
     ends_at:datetime|None=None
     legal_entity_name:str=''
@@ -629,7 +629,7 @@ class ContractIn(BaseModel):
     penalty_type:str|None=None
     penalty_amount:float|None=Field(default=None,ge=0)
     penalty_percent:float|None=Field(default=None,ge=0,le=100)
-    termination_terms:str=''
+    termination_terms:str=Field(default='',max_length=400)
 
 class ContractDecision(BaseModel):
     full_name:str=Field(min_length=3,max_length=120)
