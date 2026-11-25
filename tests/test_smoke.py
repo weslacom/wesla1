@@ -23,6 +23,13 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     assert 'id="loginForm"' in admin_page.text
     assert 'وِصلة | منصة التسويق بالعمولة' not in admin_page.text
     assert 'no-store' in admin_page.headers.get('cache-control','')
+    # Railway production must always route /control to the independent admin service.
+    monkeypatch.setenv('RAILWAY_PROJECT_ID','wesla-production')
+    monkeypatch.delenv('ADMIN_PORTAL_URL',raising=False)
+    independent_admin=client.get('/control',follow_redirects=False)
+    assert independent_admin.status_code==307
+    assert independent_admin.headers['location']=='https://wesla-admin-production.up.railway.app'
+    monkeypatch.delenv('RAILWAY_PROJECT_ID',raising=False)
     assert client.get('/api/admin/overview').status_code==200
     # Admin announcement management and public audience targeting must use the real database model.
     announcement=client.post('/api/admin/announcements',json={
