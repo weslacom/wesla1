@@ -2,7 +2,9 @@ import os, secrets, hashlib, hmac, json, base64, binascii
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
+from pathlib import Path
+from .realtime_config import inject_realtime_config
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -189,8 +191,10 @@ class ContractNegotiationResponseIn(BaseModel):
 
 @app.get('/')
 def home():
-    # Never cache the public shell: an older cached bundle could redirect admins to /control.
-    return FileResponse('app/static/index.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
+    # Inject only the public Supabase anon key; no service-role secret reaches the browser.
+    html=Path('app/static/index.html').read_text(encoding='utf-8')
+    html=inject_realtime_config(html)
+    return HTMLResponse(html,headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 @app.get('/control')
 def control_page():
     # On Railway, keep administration on its independent service even when the
