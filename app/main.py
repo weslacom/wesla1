@@ -56,6 +56,18 @@ def set_session_cookie(response:Response,token:str,max_age:int):
     # Cross-origin admin fetch requires SameSite=None; browsers require Secure with None.
     cross_origin_admin=bool(admin_origins)
     response.set_cookie('wesla_session',token,httponly=True,samesite='none' if cross_origin_admin else 'lax',secure=True if cross_origin_admin else os.getenv('COOKIE_SECURE','0')=='1',max_age=max_age)
+@app.get('/api/_portal/diagnostics')
+def portal_diagnostics(db:Session=Depends(get_db)):
+    # Safe same-origin readiness check for the administration page.
+    db.execute(text('select 1'))
+    required = ['/api/admin/password-login', '/api/admin/overview', '/api/admin/contracts',
+                '/api/admin/contract-requests', '/api/admin/negotiations', '/api/admin/termination-requests']
+    paths = app.openapi().get('paths', {})
+    routes = {path: path in paths for path in required}
+    ready = all(routes.values())
+    return {'ok': ready, 'api_reachable': True, 'database_ready': True,
+            'database_status': 'ok', 'admin_routes': routes}
+
 @app.get('/health')
 def health(db:Session=Depends(get_db)):
     # Readiness probe: confirm the application process and PostgreSQL are both responsive.
