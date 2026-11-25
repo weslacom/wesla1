@@ -2,7 +2,11 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./wesla.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    if os.getenv("VERCEL") == "1":
+        raise RuntimeError("DATABASE_URL must be configured in Vercel before Wesla can start.")
+    DATABASE_URL = "sqlite:///./wesla.db"
 
 # The project installs psycopg v3; make SQLAlchemy use that driver explicitly.
 if DATABASE_URL.startswith("postgres://"):
@@ -15,11 +19,13 @@ engine_options = {"connect_args": connect_args, "pool_pre_ping": True}
 if not DATABASE_URL.startswith("sqlite"):
     # Keep the application pool bounded. Tune these via Railway variables only
     # after checking the Supabase connection limit and the number of app replicas.
+    # Vercel runs short-lived serverless instances; bound each local connection pool.
+    on_vercel = os.getenv("VERCEL") == "1"
     engine_options.update({
-        "pool_size": max(1, int(os.getenv("DB_POOL_SIZE", "5"))),
-        "max_overflow": max(0, int(os.getenv("DB_MAX_OVERFLOW", "5"))),
-        "pool_timeout": max(5, int(os.getenv("DB_POOL_TIMEOUT", "20"))),
-        "pool_recycle": max(300, int(os.getenv("DB_POOL_RECYCLE", "1800"))),
+        "pool_size": max(1, int(os.getenv("DB_POOL_SIZE", "1" if on_vercel else "5"))),
+        "max_overflow": max(0, int(os.getenv("DB_MAX_OVERFLOW", "0" if on_vercel else "5"))),
+        "pool_timeout": max(5, int(os.getenv("DB_POOL_TIMEOUT", "15" if on_vercel else "20"))),
+        "pool_recycle": max(300, int(os.getenv("DB_POOL_RECYCLE", "600" if on_vercel else "1800"))),
         "pool_use_lifo": True,
         "connect_args": {"connect_timeout": 10},
     })

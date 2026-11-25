@@ -29,7 +29,7 @@ def test_contract_document_uses_wesla_mark_and_compact_a4_layout():
 def test_admin_portal_supports_private_upstream_and_disables_dashboard_caching():
     source = Path("app/admin_portal.py").read_text(encoding="utf-8")
     assert 'parsed.hostname.endswith(".railway.internal")' in source
-    assert 'out_headers.setdefault("cache-control", "no-store' in source
+    assert 'response_headers["Cache-Control"] = "no-store' in source
 
 def test_public_and_admin_pages_refresh_read_only_views_without_overwriting_forms():
     public_html = Path("app/static/index.html").read_text(encoding="utf-8")
@@ -37,7 +37,7 @@ def test_public_and_admin_pages_refresh_read_only_views_without_overwriting_form
     assert "refreshPublicContent" in public_html
     assert "Promise.allSettled(jobs)" in public_html
     assert "refreshActiveSection" in admin_html
-    assert "content.querySelector('form, input, textarea, select')" in admin_html
+    assert "$('#content').querySelector('form, input, textarea, select')" in admin_html
     assert "lastActivity" in admin_html and "18000" in admin_html
     assert "lastActivity" in public_html and "18000" in public_html
 
@@ -61,7 +61,7 @@ def test_native_postgres_sse_sync_uses_sanitized_notifications():
     assert 'json_build_object' in migration
     assert "'/api/public/events'" in main_source
     assert "'/api/admin/events'" in main_source
-    assert 'text/event-stream' in admin_source
+    assert 'text/event-stream' in main_source
     assert 'new EventSource("/api/public/events")' in public_html
     assert "new EventSource('/api/admin/events')" in admin_html
     assert 'realtime.send' not in migration
