@@ -101,7 +101,7 @@ async def stream_database_events(request: Request, admin_only: bool = False):
     async def event_generator():
         last_auth_check = asyncio.get_running_loop().time()
         try:
-            yield 'retry: 3000\\n\\n'
+            yield 'retry: 3000\n\n'
             while True:
                 if await request.is_disconnected():
                     break
@@ -113,10 +113,10 @@ async def stream_database_events(request: Request, admin_only: bool = False):
                         try:
                             require_admin_stream_access(request)
                         except HTTPException:
-                            yield 'event: auth_expired\\ndata: {}\\n\\n'
+                            yield 'event: auth_expired\ndata: {}\n\n'
                             break
                         last_auth_check = now
-                    yield ': keep-alive\\n\\n'
+                    yield ': keep-alive\n\n'
                     continue
                 try:
                     payload = json.loads(raw)
@@ -124,7 +124,7 @@ async def stream_database_events(request: Request, admin_only: bool = False):
                     continue
                 if not admin_only and payload.get('table') not in PUBLIC_EVENT_TABLES:
                     continue
-                yield 'data: ' + json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\\n\\n'
+                yield 'data: ' + json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n\n'
         finally:
             await event_hub.unsubscribe(queue)
     return StreamingResponse(
