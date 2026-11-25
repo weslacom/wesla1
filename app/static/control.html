@@ -45,16 +45,17 @@ async function check(){try{let d=await api('/api/me');if(d.user.role==='admin')a
 async function terminationRequests(){try{let a=await api('/api/admin/termination-requests');$('#content').innerHTML='<h2>طلبات فسخ الاتفاقيات</h2>'+(a.map(x=>'<div class="item"><b>'+esc(x.contract_number)+' — '+esc(x.requester)+'</b><p>'+esc(x.reason)+'</p><p class="small">الحالة: '+x.status+'</p>'+(x.status==='under_review'?'<button onclick="decideTermination('+x.id+',\'accept\')">قبول الفسخ</button> <button class="danger" onclick="decideTermination('+x.id+',\'reject\')">رفض الطلب</button>':'')+'</div>').join('')||'<p class="muted">لا توجد طلبات فسخ.</p>')}catch(e){msg(e.message,true)}}
 async function decideTermination(id,decision){let reason=prompt('اكتب سبب القرار:');if(!reason)return;try{await api('/api/admin/termination-requests/'+id+'/decision',{method:'POST',body:JSON.stringify({decision,reason})});terminationRequests();msg('تم تسجيل القرار')}catch(e){msg(e.message,true)}}
 </script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-// Keep the independent admin view synchronized with changes made on the main site.
-// Refresh only read-only sections; never overwrite an open form or password dialog.
+// Subscribe to sanitized database events and refresh the active read-only admin view.
 (() => {
   let lastActivity = Date.now();
+  let refreshPending = false;
   ["pointerdown", "keydown", "touchstart", "wheel"].forEach(eventName =>
     window.addEventListener(eventName, () => { lastActivity = Date.now(); }, { passive: true })
   );
   const refreshActiveSection = () => {
-    if (document.hidden || Date.now() - lastActivity < 18000) return;
+    if (!refreshPending || document.hidden || Date.now() - lastActivity < 18000) return;
     const app = document.getElementById('app');
     if (!app || app.classList.contains('hidden')) return;
     const passwordPanel = document.getElementById('passwordPanel');
@@ -62,9 +63,27 @@ async function decideTermination(id,decision){let reason=prompt('اكتب سبب
     const content = document.getElementById('content');
     if (!content || content.querySelector('form, input, textarea, select')) return;
     const active = document.querySelector('#tabs button.active');
-    if (active) active.click();
+    if (!active) return;
+    refreshPending = false;
+    active.click();
   };
-  window.setInterval(refreshActiveSection, 12000);
+  const supabaseFactory = window.supabase && window.supabase.createClient;
+  if (supabaseFactory && window.WESLA_SUPABASE_URL && window.WESLA_SUPABASE_ANON_KEY) {
+    try {
+      const client = supabaseFactory(window.WESLA_SUPABASE_URL, window.WESLA_SUPABASE_ANON_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+      });
+      const channel = client.channel("wesla:updates", { config: { private: true } })
+        .on("broadcast", { event: "wesla_change" }, () => {
+          refreshPending = true;
+          refreshActiveSection();
+        })
+        .subscribe(status => { window.WESLA_REALTIME_STATUS = status; });
+      window.addEventListener("beforeunload", () => { void client.removeChannel(channel); });
+    } catch (error) { console.warn("Wesla admin realtime subscription unavailable", error); }
+  }
+  window.setInterval(() => { refreshPending = true; refreshActiveSection(); }, 60000);
+  window.setInterval(refreshActiveSection, 4000);
 })();
 </script>
 </body></html>

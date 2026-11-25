@@ -47,3 +47,17 @@ def test_gitlab_pipeline_deploys_both_railway_services_after_tests():
     assert "WESLA_WEB_SERVICE_ID" in pipeline
     assert "WESLA_ADMIN_SERVICE_ID" in pipeline
     assert pipeline.index('WESLA_WEB_SERVICE_ID') < pipeline.index('WESLA_ADMIN_SERVICE_ID')
+
+
+def test_realtime_broadcast_is_configured_without_exposing_private_keys():
+    config = Path("app/realtime_config.py").read_text(encoding="utf-8")
+    migration = Path("supabase/migrations/20261125114500_wesla_realtime_broadcast.sql").read_text(encoding="utf-8")
+    public_html = Path("app/static/index.html").read_text(encoding="utf-8")
+    admin_html = Path("app/static/control.html").read_text(encoding="utf-8")
+    assert "DEFAULT_SUPABASE_ANON_KEY" in config
+    assert "service_role" in config
+    assert "realtime.send" in migration
+    assert "wesla:updates" in migration
+    assert "private IS TRUE" in migration
+    assert "createClient" in public_html and "createClient" in admin_html
+    assert "WESLA_REALTIME_STATUS" in public_html and "WESLA_REALTIME_STATUS" in admin_html
