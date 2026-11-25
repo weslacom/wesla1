@@ -58,8 +58,12 @@ $('#orderForm').onsubmit=submitOrder;$('#trackOrderForm').onsubmit=async e=>{e.p
 // Pause while the visitor is signing in, searching, or viewing a modal.
 (() => {
   let refreshing = false;
+  let lastActivity = Date.now();
+  ["pointerdown", "keydown", "touchstart", "wheel"].forEach(eventName =>
+    window.addEventListener(eventName, () => { lastActivity = Date.now(); }, { passive: true })
+  );
   const refreshPublicContent = async () => {
-    if (refreshing || document.hidden || location.pathname !== "/") return;
+    if (refreshing || document.hidden || Date.now() - lastActivity < 18000 || location.pathname !== "/") return;
     if (typeof me !== "undefined" && me) return;
     const auth = document.getElementById("auth");
     if (auth && !auth.classList.contains("hidden")) return;
