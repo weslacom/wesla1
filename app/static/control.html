@@ -45,9 +45,8 @@ async function check(){try{let d=await api('/api/me');if(d.user.role==='admin')a
 async function terminationRequests(){try{let a=await api('/api/admin/termination-requests');$('#content').innerHTML='<h2>طلبات فسخ الاتفاقيات</h2>'+(a.map(x=>'<div class="item"><b>'+esc(x.contract_number)+' — '+esc(x.requester)+'</b><p>'+esc(x.reason)+'</p><p class="small">الحالة: '+x.status+'</p>'+(x.status==='under_review'?'<button onclick="decideTermination('+x.id+',\'accept\')">قبول الفسخ</button> <button class="danger" onclick="decideTermination('+x.id+',\'reject\')">رفض الطلب</button>':'')+'</div>').join('')||'<p class="muted">لا توجد طلبات فسخ.</p>')}catch(e){msg(e.message,true)}}
 async function decideTermination(id,decision){let reason=prompt('اكتب سبب القرار:');if(!reason)return;try{await api('/api/admin/termination-requests/'+id+'/decision',{method:'POST',body:JSON.stringify({decision,reason})});terminationRequests();msg('تم تسجيل القرار')}catch(e){msg(e.message,true)}}
 </script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-// Subscribe to sanitized database events and refresh the active read-only admin view.
+// Native PostgreSQL notifications are proxied as SSE from the main API.
 (() => {
   let lastActivity = Date.now();
   let refreshPending = false;
@@ -67,23 +66,13 @@ async function decideTermination(id,decision){let reason=prompt('اكتب سبب
     refreshPending = false;
     active.click();
   };
-  const supabaseFactory = window.supabase && window.supabase.createClient;
-  if (supabaseFactory && window.WESLA_SUPABASE_URL && window.WESLA_SUPABASE_ANON_KEY) {
-    try {
-      const client = supabaseFactory(window.WESLA_SUPABASE_URL, window.WESLA_SUPABASE_ANON_KEY, {
-        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
-      });
-      const channel = client.channel("wesla:updates", { config: { private: true } })
-        .on("broadcast", { event: "wesla_change" }, () => {
-          refreshPending = true;
-          refreshActiveSection();
-        })
-        .subscribe(status => { window.WESLA_REALTIME_STATUS = status; });
-      window.addEventListener("beforeunload", () => { void client.removeChannel(channel); });
-    } catch (error) { console.warn("Wesla admin realtime subscription unavailable", error); }
-  }
+  const stream = new EventSource('/api/admin/events');
+  stream.onmessage = () => { refreshPending = true; refreshActiveSection(); };
+  stream.addEventListener('auth_expired', () => { stream.close(); location.reload(); });
+  stream.onerror = () => { window.WESLA_REALTIME_STATUS = 'reconnecting'; };
   window.setInterval(() => { refreshPending = true; refreshActiveSection(); }, 60000);
   window.setInterval(refreshActiveSection, 4000);
+  window.addEventListener('beforeunload', () => stream.close());
 })();
 </script>
 </body></html>
