@@ -49,15 +49,20 @@ def test_gitlab_pipeline_deploys_both_railway_services_after_tests():
     assert pipeline.index('WESLA_WEB_SERVICE_ID') < pipeline.index('WESLA_ADMIN_SERVICE_ID')
 
 
-def test_realtime_broadcast_is_configured_without_exposing_private_keys():
-    config = Path("app/realtime_config.py").read_text(encoding="utf-8")
-    migration = Path("supabase/migrations/20261125114500_wesla_realtime_broadcast.sql").read_text(encoding="utf-8")
+def test_native_postgres_sse_sync_uses_sanitized_notifications():
+    event_hub = Path("app/event_hub.py").read_text(encoding="utf-8")
+    migration = Path("supabase/migrations/20261125120000_wesla_native_notify_events.sql").read_text(encoding="utf-8")
+    main_source = Path("app/main.py").read_text(encoding="utf-8")
+    admin_source = Path("app/admin_portal.py").read_text(encoding="utf-8")
     public_html = Path("app/static/index.html").read_text(encoding="utf-8")
     admin_html = Path("app/static/control.html").read_text(encoding="utf-8")
-    assert "DEFAULT_SUPABASE_ANON_KEY" in config
-    assert "service_role" in config
-    assert "realtime.send" in migration
-    assert "wesla:updates" in migration
-    assert "private IS TRUE" in migration
-    assert "createClient" in public_html and "createClient" in admin_html
-    assert "WESLA_REALTIME_STATUS" in public_html and "WESLA_REALTIME_STATUS" in admin_html
+    assert 'LISTEN wesla_changes' in event_hub
+    assert 'pg_notify' in migration
+    assert 'json_build_object' in migration
+    assert "'/api/public/events'" in main_source
+    assert "'/api/admin/events'" in main_source
+    assert 'text/event-stream' in admin_source
+    assert 'new EventSource("/api/public/events")' in public_html
+    assert "new EventSource('/api/admin/events')" in admin_html
+    assert 'realtime.send' not in migration
+
