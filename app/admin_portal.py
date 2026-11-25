@@ -82,7 +82,7 @@ async def health(request: Request):
 async def portal_diagnostics(request: Request):
     result = await probe_upstream(request)
     return Response(content=json.dumps(result, ensure_ascii=False), media_type="application/json",
-                    status_code=200 if result["ok"] else 503, headers={"Cache-Control": "no-store"})
+                    status_code=200, headers={"Cache-Control": "no-store"})
 
 
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
