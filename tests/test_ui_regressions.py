@@ -37,7 +37,7 @@ def test_public_and_admin_pages_refresh_read_only_views_without_overwriting_form
     assert "refreshPublicContent" in public_html
     assert "Promise.allSettled(jobs)" in public_html
     assert "refreshActiveSection" in admin_html
-    assert "content.querySelector('form, input, textarea, select')" in admin_html
+    assert "$('#content').querySelector('form, input, textarea, select')" in admin_html
     assert "lastActivity" in admin_html and "18000" in admin_html
     assert "lastActivity" in public_html and "18000" in public_html
 
