@@ -24,3 +24,24 @@ def test_contract_document_uses_wesla_mark_and_compact_a4_layout():
     assert 'إقرار وموافقة الأطراف' in source
     assert 'والله شاهدٌ علينا، وهو خير الشاهدين' in source
     assert 'لا يُعد ختم وصلة البصري وحده شهادة تصديق أو توقيعًا رقميًا معتمدًا' in source
+
+
+def test_admin_portal_supports_private_upstream_and_disables_dashboard_caching():
+    source = Path("app/admin_portal.py").read_text(encoding="utf-8")
+    assert 'parsed.hostname.endswith(".railway.internal")' in source
+    assert 'out_headers.setdefault("cache-control", "no-store' in source
+
+def test_public_and_admin_pages_refresh_read_only_views_without_overwriting_forms():
+    public_html = Path("app/static/index.html").read_text(encoding="utf-8")
+    admin_html = Path("app/static/control.html").read_text(encoding="utf-8")
+    assert "refreshPublicContent" in public_html
+    assert "Promise.allSettled(jobs)" in public_html
+    assert "refreshActiveSection" in admin_html
+    assert "content.querySelector('form, input, textarea, select')" in admin_html
+
+def test_gitlab_pipeline_deploys_both_railway_services_after_tests():
+    pipeline = Path(".gitlab-ci.yml").read_text(encoding="utf-8")
+    assert "pytest -q" in pipeline
+    assert "WESLA_WEB_SERVICE_ID" in pipeline
+    assert "WESLA_ADMIN_SERVICE_ID" in pipeline
+    assert pipeline.index('WESLA_WEB_SERVICE_ID') < pipeline.index('WESLA_ADMIN_SERVICE_ID')
