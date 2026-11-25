@@ -193,8 +193,11 @@ def home():
     return FileResponse('app/static/index.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 @app.get('/control')
 def control_page():
-    # The admin portal is reachable only through its dedicated route, never from the public home page.
+    # On Railway, keep administration on its independent service even when the
+    # optional override was not configured. Local development retains the local page.
     admin_url=os.getenv('ADMIN_PORTAL_URL','').strip()
+    if not admin_url and (os.getenv('RAILWAY_PROJECT_ID') or os.getenv('RAILWAY_SERVICE_ID')):
+        admin_url='https://wesla-admin-production.up.railway.app'
     if admin_url:
         return RedirectResponse(admin_url,status_code=307,headers={'Cache-Control':'no-store'})
     return FileResponse('app/static/control.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
