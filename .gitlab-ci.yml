@@ -7,6 +7,12 @@ workflow:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
+variables:
+  RAILWAY_PROJECT_ID: "69e0dcfe-0810-4896-a52b-b588fb0eae063"
+  RAILWAY_ENVIRONMENT_ID: "488a0e1a-9351-425c-8483-ee02aee8ea0c"
+  WESLA_WEB_SERVICE_ID: "e2b900c4-9111-4d0c-95bd-158c003aba56"
+  WESLA_ADMIN_SERVICE_ID: "f90612c6-5068-4069-8f96-81159f8511e7"
+
 test:
   stage: test
   image: python:3.12-slim
@@ -23,4 +29,5 @@ deploy_railway:
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $RAILWAY_TOKEN'
   script:
-    - railway up --ci --service wesla-web --environment production --project 69e0dcfe-0810-4896-a52b-588fb0eae063
+    - railway up --ci --service "$WESLA_WEB_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --project "$RAILWAY_PROJECT_ID" -m "Deploy Wesla main website"
+    - railway up --ci --service "$WESLA_ADMIN_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --project "$RAILWAY_PROJECT_ID" -m "Deploy Wesla independent admin portal"
