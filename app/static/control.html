@@ -44,4 +44,23 @@ async function resumeAnnouncement(id){try{await api('/api/admin/announcements/'+
 async function check(){try{let d=await api('/api/me');if(d.user.role==='admin')await start(d.user);else msg('هذه الصفحة مخصصة لمدير المنصة فقط. أدخل كلمة مرور الإدارة للمتابعة.',true)}catch(e){}}check();
 async function terminationRequests(){try{let a=await api('/api/admin/termination-requests');$('#content').innerHTML='<h2>طلبات فسخ الاتفاقيات</h2>'+(a.map(x=>'<div class="item"><b>'+esc(x.contract_number)+' — '+esc(x.requester)+'</b><p>'+esc(x.reason)+'</p><p class="small">الحالة: '+x.status+'</p>'+(x.status==='under_review'?'<button onclick="decideTermination('+x.id+',\'accept\')">قبول الفسخ</button> <button class="danger" onclick="decideTermination('+x.id+',\'reject\')">رفض الطلب</button>':'')+'</div>').join('')||'<p class="muted">لا توجد طلبات فسخ.</p>')}catch(e){msg(e.message,true)}}
 async function decideTermination(id,decision){let reason=prompt('اكتب سبب القرار:');if(!reason)return;try{await api('/api/admin/termination-requests/'+id+'/decision',{method:'POST',body:JSON.stringify({decision,reason})});terminationRequests();msg('تم تسجيل القرار')}catch(e){msg(e.message,true)}}
-</script></body></html>
+</script>
+<script>
+// Keep the independent admin view synchronized with changes made on the main site.
+// Refresh only read-only sections; never overwrite an open form or password dialog.
+(() => {
+  const refreshActiveSection = () => {
+    if (document.hidden) return;
+    const app = document.getElementById('app');
+    if (!app || app.classList.contains('hidden')) return;
+    const passwordPanel = document.getElementById('passwordPanel');
+    if (passwordPanel && !passwordPanel.classList.contains('hidden')) return;
+    const content = document.getElementById('content');
+    if (!content || content.querySelector('form, input, textarea, select')) return;
+    const active = document.querySelector('#tabs button.active');
+    if (active) active.click();
+  };
+  window.setInterval(refreshActiveSection, 12000);
+})();
+</script>
+</body></html>
