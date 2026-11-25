@@ -14,3 +14,12 @@ def test_admin_navigation_is_fixed_and_contains_required_sections():
     assert '.tabs{position:fixed!important' in html
     for label in ("العقود", "التفاوض", "الفسخ", "المنتجات", "الإعلانات"):
         assert label in html
+
+def test_contract_document_uses_wesla_mark_and_compact_a4_layout():
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert 'viewBox="0 0 520 195"' in source
+    assert '@page{{size:A4 portrait;margin:5mm}}' in source
+    assert 'أحكام التعامل والتسوية:' in source
+    assert 'إقرار وموافقة الأطراف' in source
+    assert 'والله شاهدٌ علينا، وهو خير الشاهدين' in source
+    assert 'لا يُعد ختم وصلة البصري وحده شهادة تصديق أو توقيعًا رقميًا معتمدًا' in source
