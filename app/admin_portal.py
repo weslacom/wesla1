@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, Response
+from .realtime_config import inject_realtime_config
 from fastapi.middleware.gzip import GZipMiddleware
 
 app = FastAPI(title="Wesla Admin Portal")
@@ -40,6 +41,7 @@ def upstream_base(request: Request | None = None) -> str:
 @app.get("/")
 def admin_home():
     html = Path("app/static/control.html").read_text(encoding="utf-8")
+    html = inject_realtime_config(html)
     # API calls stay same-origin and are securely proxied by this service.
     html = html.replace(
         "<script>",
