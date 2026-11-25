@@ -7,6 +7,8 @@ def test_public_page_features_are_present_and_product_loader_is_async():
     assert 'id="accountActions"' in html
     assert 'async function loadProducts()' in html
     assert "function loadProducts(){try{let ps=await" not in html
+    assert "async function merchantProduct()" in html
+    assert "function merchantProduct(){" not in html
     assert "#tabs{position:fixed" in html
 
 def test_admin_navigation_is_fixed_and_contains_required_sections():
