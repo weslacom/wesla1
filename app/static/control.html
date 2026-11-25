@@ -49,8 +49,12 @@ async function decideTermination(id,decision){let reason=prompt('اكتب سبب
 // Keep the independent admin view synchronized with changes made on the main site.
 // Refresh only read-only sections; never overwrite an open form or password dialog.
 (() => {
+  let lastActivity = Date.now();
+  ["pointerdown", "keydown", "touchstart", "wheel"].forEach(eventName =>
+    window.addEventListener(eventName, () => { lastActivity = Date.now(); }, { passive: true })
+  );
   const refreshActiveSection = () => {
-    if (document.hidden) return;
+    if (document.hidden || Date.now() - lastActivity < 18000) return;
     const app = document.getElementById('app');
     if (!app || app.classList.contains('hidden')) return;
     const passwordPanel = document.getElementById('passwordPanel');
