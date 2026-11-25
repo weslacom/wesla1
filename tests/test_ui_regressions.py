@@ -66,3 +66,12 @@ def test_native_postgres_sse_sync_uses_sanitized_notifications():
     assert "new EventSource('/api/admin/events')" in admin_html
     assert 'realtime.send' not in migration
 
+
+
+def test_event_listener_uses_supabase_session_pooler_for_listen(monkeypatch):
+    from app.event_hub import listen_dsn
+    monkeypatch.delenv("LISTEN_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://postgres.project:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require")
+    assert listen_dsn() == "postgresql://postgres.project:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?sslmode=require"
+    monkeypatch.setenv("LISTEN_DATABASE_URL", "postgresql://postgres:secret@db.project.supabase.co:5432/postgres?sslmode=require")
+    assert listen_dsn() == "postgresql://postgres:secret@db.project.supabase.co:5432/postgres?sslmode=require"
