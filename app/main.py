@@ -1,10 +1,8 @@
-import os, secrets, hashlib, hmac, json, base64, binascii
+import os, secrets, hashlib, hmac, json, base64, binascii, asyncio
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
-from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
-from pathlib import Path
-from .realtime_config import inject_realtime_config
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text
 from .database import Base, engine, get_db, SessionLocal
+from .event_hub import event_hub
 from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement
 
 Base.metadata.create_all(bind=engine)
@@ -84,6 +83,65 @@ def require_role(*roles):
         if user.role not in roles: raise HTTPException(403,'ليس لديك صلاحية لهذا الإجراء')
         return user
     return dep
+
+PUBLIC_EVENT_TABLES = {'products', 'product_variants', 'product_images', 'announcements', 'site_settings'}
+
+def require_admin_stream_access(request: Request):
+    # Validate once with a short-lived DB session; never hold a DB session open for an SSE connection.
+    db = SessionLocal()
+    try:
+        user = current_user(request, db)
+        if user.role != 'admin':
+            raise HTTPException(403, 'ليس لديك صلاحية لمتابعة تحديثات الإدارة')
+    finally:
+        db.close()
+
+async def stream_database_events(request: Request, admin_only: bool = False):
+    queue = await event_hub.subscribe()
+    async def event_generator():
+        last_auth_check = asyncio.get_running_loop().time()
+        try:
+            yield 'retry: 3000\\n\\n'
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    raw = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    now = asyncio.get_running_loop().time()
+                    if admin_only and now - last_auth_check >= 60:
+                        try:
+                            require_admin_stream_access(request)
+                        except HTTPException:
+                            yield 'event: auth_expired\\ndata: {}\\n\\n'
+                            break
+                        last_auth_check = now
+                    yield ': keep-alive\\n\\n'
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not admin_only and payload.get('table') not in PUBLIC_EVENT_TABLES:
+                    continue
+                yield 'data: ' + json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\\n\\n'
+        finally:
+            await event_hub.unsubscribe(queue)
+    return StreamingResponse(
+        event_generator(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache, no-store', 'X-Accel-Buffering': 'no', 'Content-Encoding': 'identity'},
+    )
+
+@app.get('/api/public/events')
+async def public_database_events(request: Request):
+    return await stream_database_events(request, admin_only=False)
+
+@app.get('/api/admin/events')
+async def admin_database_events(request: Request):
+    require_admin_stream_access(request)
+    return await stream_database_events(request, admin_only=True)
+
 
 def public_user(u): return {'id':u.id,'name':u.name,'email':u.email,'role':u.role,'status':u.status,'contact_phone':u.contact_phone,'contact_whatsapp':u.contact_whatsapp,'contact_public':u.contact_public}
 def products_out(rows,db):
@@ -191,10 +249,8 @@ class ContractNegotiationResponseIn(BaseModel):
 
 @app.get('/')
 def home():
-    # Inject only the public Supabase anon key; no service-role secret reaches the browser.
-    html=Path('app/static/index.html').read_text(encoding='utf-8')
-    html=inject_realtime_config(html)
-    return HTMLResponse(html,headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
+    # Never cache the public shell: it contains the current client-side application code.
+    return FileResponse('app/static/index.html',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 @app.get('/control')
 def control_page():
     # On Railway, keep administration on its independent service even when the
