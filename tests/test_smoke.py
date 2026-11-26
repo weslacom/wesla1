@@ -10,6 +10,31 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     # Import after setting env; this test is intended to run in a fresh pytest process.
     from app.main import app
     client=TestClient(app)
+    # Production-only contract brand assets are provisioned by Supabase migrations;
+    # create empty equivalents for the isolated SQLite smoke-test database.
+    from app.database import SessionLocal
+    from sqlalchemy import text
+    setup_db=SessionLocal()
+    try:
+        setup_db.execute(text("""
+            create table if not exists wesla_contract_brand_assets (
+                id integer primary key, signature_data_url text, stamp_data_url text,
+                is_active boolean not null default true, signature_enabled boolean not null default true,
+                stamp_enabled boolean not null default true, contract_types text not null default '[]',
+                version integer not null default 1, updated_by integer, updated_at datetime
+            )
+        """))
+        setup_db.execute(text("""
+            create table if not exists wesla_contract_brand_asset_versions (
+                id integer primary key autoincrement, version integer not null, signature_data_url text,
+                stamp_data_url text, is_active boolean not null default true,
+                signature_enabled boolean not null default true, stamp_enabled boolean not null default true,
+                contract_types text not null default '[]', changed_by integer, created_at datetime
+            )
+        """))
+        setup_db.commit()
+    finally:
+        setup_db.close()
     assert client.get('/health').json()['ok'] is True
     assert client.post('/api/login',json={'email':'root@wesla.test','password':'StrongPassword123!'}).status_code==200
     # Admin authentication must not turn the public homepage into the admin portal.
