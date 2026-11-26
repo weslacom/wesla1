@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text
 from .database import Base, engine, get_db, SessionLocal
 from .event_hub import event_hub
-from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement, AnnouncementEvent
+from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement, AnnouncementEvent, Favorite, Coupon, CouponRedemption, SupportTicket, SupportMessage, WalletTransaction
 
 # Production schema is managed by Supabase migrations. Vercel instances are ephemeral.
 # Keep automatic schema creation for local development and isolated tests only.
@@ -228,6 +228,36 @@ class AnnouncementEventIn(BaseModel):
     event_type: str
     visitor_key: str = Field(min_length=24, max_length=64)
 
+class FavoriteIn(BaseModel):
+    product_id: int
+
+class SupportTicketIn(BaseModel):
+    subject: str = Field(min_length=4,max_length=180)
+    message: str = Field(min_length=10,max_length=5000)
+
+class SupportMessageIn(BaseModel):
+    body: str = Field(min_length=2,max_length=5000)
+
+class SupportTicketUpdateIn(BaseModel):
+    status: str | None = None
+    priority: str | None = None
+
+class CouponIn(BaseModel):
+    code: str = Field(min_length=3,max_length=40)
+    discount_type: str
+    discount_value: Decimal = Field(gt=0)
+    min_order_total: Decimal = Field(default=Decimal('0'),ge=0)
+    max_discount: Decimal | None = Field(default=None,gt=0)
+    usage_limit: int | None = Field(default=None,ge=1)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+class CouponUpdateIn(BaseModel):
+    is_active: bool | None = None
+    usage_limit: int | None = Field(default=None,ge=1)
+    ends_at: datetime | None = None
+
+
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
@@ -248,7 +278,7 @@ class ProductIn(BaseModel):
     size_guide:dict={}; images:list[str]=Field(default_factory=list,max_length=4)
 class OrderIn(BaseModel):
     product_id:int; quantity:int=Field(ge=1,le=20); customer_name:str; customer_phone:str; address:str
-    referral_code:str|None=None; variant_id:int|None=None
+    referral_code:str|None=None; variant_id:int|None=None; coupon_code:str|None=Field(default=None,max_length=40)
 class OrderTrackIn(BaseModel):
     order_number:str=Field(min_length=6,max_length=32)
     customer_phone:str=Field(min_length=5,max_length=40)
@@ -600,19 +630,38 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     code=data.referral_code or request.cookies.get('wesla_ref'); link=db.scalar(select(Link).where(Link.code==code)) if code else None
     affiliate_id=link.affiliate_id if link and link.product_id==p.id else None
     chosen_price=variant.price_override if variant and variant.price_override is not None else p.price
-    total=(Decimal(chosen_price)*data.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP); ac=(total*Decimal(p.affiliate_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if affiliate_id else Decimal('0.00'); pc=(total*Decimal(p.platform_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
+    subtotal=(Decimal(chosen_price)*data.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    coupon=None; discount=Decimal('0.00')
+    if data.coupon_code and data.coupon_code.strip():
+        coupon=db.scalar(select(Coupon).where(Coupon.code==data.coupon_code.strip().upper()).with_for_update())
+        now_utc=datetime.now(timezone.utc)
+        if not coupon or not coupon.is_active or (coupon.starts_at and coupon.starts_at>now_utc) or (coupon.ends_at and coupon.ends_at<=now_utc):
+            raise HTTPException(400,'كود الخصم غير صالح أو غير نشط')
+        if coupon.usage_limit is not None and coupon.used_count>=coupon.usage_limit:
+            raise HTTPException(400,'انتهى عدد مرات استخدام كود الخصم')
+        if subtotal<Decimal(coupon.min_order_total):
+            raise HTTPException(400,f'الحد الأدنى للطلب لاستخدام الكود هو {coupon.min_order_total} جنيه')
+        discount=(subtotal*Decimal(coupon.discount_value)/Decimal(100)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP) if coupon.discount_type=='percent' else Decimal(coupon.discount_value)
+        if coupon.max_discount is not None: discount=min(discount,Decimal(coupon.max_discount))
+        discount=min(discount,subtotal)
+    total=(subtotal-discount).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+    ac=(total*Decimal(p.affiliate_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if affiliate_id else Decimal('0.00')
+    pc=(total*Decimal(p.platform_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,coupon_code=coupon.code if coupon else None,discount_amount=discount,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
     if variant: variant.stock-=data.quantity
     p.stock-=data.quantity
     # Hide the product from all public catalogues as soon as its total stock reaches zero.
     # Keep the product/order history in the database; it can be republished by restocking.
     if p.stock<=0: p.status='sold_out'
     db.add(order)
+    if coupon:
+        db.flush(); coupon.used_count+=1
+        db.add(CouponRedemption(coupon_id=coupon.id,order_id=order.id,user_id=None,discount_amount=discount))
     notify_user(db,p.merchant_id,'طلب جديد على منتجك',f'رقم الطلب {order.order_number} — إجمالي {total} جنيه','/dashboard')
     if affiliate_id:
         notify_user(db,affiliate_id,'طلب جديد من رابطك التسويقي',f'رقم الطلب {order.order_number}. ستظهر عمولتك بعد تأكيد التسليم.','/dashboard')
     db.commit(); db.refresh(order)
-    return {'order_number':order.order_number,'status':order.status,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
+    return {'order_number':order.order_number,'status':order.status,'subtotal':subtotal,'discount':discount,'coupon_code':coupon.code if coupon else None,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
 @app.post('/api/orders/track')
 def track_order(data:OrderTrackIn,db:Session=Depends(get_db)):
     row=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.order_number==data.order_number.strip().upper(),Order.customer_phone==data.customer_phone.strip())).first()
