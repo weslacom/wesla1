@@ -1801,3 +1801,342 @@ def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(re
     """),{'key':feature_key,'enabled':enabled,'audience':json.dumps(audience),'config':json.dumps(config)})
     db.commit()
     return {'ok':True,'feature_key':feature_key,'is_enabled':enabled}
+
+
+# Wesla operational features requested by the owner: public merchant directory,
+# referral/rewards administration, visitor analytics, internal pages and account actions.
+class PublicVisitIn(BaseModel):
+    visitor_key: str = Field(min_length=24, max_length=64)
+    path: str = Field(default='/', max_length=500)
+
+class InternalPageIn(BaseModel):
+    slug: str = Field(min_length=2, max_length=100)
+    title: str = Field(min_length=2, max_length=180)
+    body: str = Field(min_length=1, max_length=30000)
+    audience: str = Field(default='all', max_length=20)
+    is_published: bool = False
+
+class AccountActionIn(BaseModel):
+    status: str
+    reason: str = Field(min_length=5, max_length=2000)
+
+class MerchantPenaltyIn(BaseModel):
+    amount_egp: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    reason: str = Field(min_length=10, max_length=3000)
+    contract_id: int | None = None
+
+class PenaltyDecisionIn(BaseModel):
+    decision: str
+    admin_note: str = Field(min_length=5, max_length=2000)
+
+class ReferralRewardConfigIn(BaseModel):
+    referral_reward_points: int = Field(ge=0, le=100000)
+    signup_reward_points: int = Field(default=0, ge=0, le=100000)
+
+@app.post('/api/public/visit')
+def record_public_visit(data: PublicVisitIn, request: Request, db: Session = Depends(get_db)):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', data.visitor_key):
+        raise HTTPException(400, 'معرّف الزائر غير صالح')
+    path = data.path if data.path.startswith('/') and not data.path.startswith('//') else '/'
+    path = path.split('?', 1)[0][:500]
+    actor = None
+    token = request.cookies.get('wesla_session')
+    if token:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        session = db.scalar(select(AuthSession).where(AuthSession.token_hash == token_hash))
+        if session:
+            actor = db.get(User, session.user_id)
+            if actor and actor.status != 'active':
+                actor = None
+    db.execute(text("""
+      insert into wesla_site_visits(visitor_key,visit_date,path,user_id)
+      values (:key,current_date,:path,:uid)
+      on conflict(visitor_key,visit_date) do nothing
+    """), {'key': data.visitor_key, 'path': path, 'uid': actor.id if actor else None})
+    db.commit()
+    return {'ok': True}
+
+@app.get('/api/admin/visitors')
+def admin_visitor_analytics(user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    totals = db.execute(text("""
+      select count(*)::int as unique_visits_today,
+             (select count(distinct visitor_key)::int from wesla_site_visits where created_at >= now()-interval '30 days') as unique_visitors_30d,
+             (select count(*)::int from wesla_site_visits where created_at >= now()-interval '30 days') as visit_days_30d,
+             (select count(*)::int from wesla_site_visits) as total_visit_days
+      from wesla_site_visits where visit_date=current_date
+    """)).mappings().first()
+    daily = db.execute(text("""
+      select visit_date, count(*)::int as visitors
+      from wesla_site_visits
+      where visit_date >= current_date - 13
+      group by visit_date order by visit_date
+    """)).mappings().all()
+    paths = db.execute(text("""
+      select path, count(*)::int as visitors
+      from wesla_site_visits
+      where created_at >= now()-interval '30 days'
+      group by path order by visitors desc limit 15
+    """)).mappings().all()
+    return {'summary': dict(totals or {}), 'daily': [dict(x) for x in daily], 'top_paths': [dict(x) for x in paths]}
+
+@app.get('/api/public/merchants')
+def public_merchants(response: Response, db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+      select u.id,u.name,count(p.id)::int as product_count
+      from users u left join products p on p.merchant_id=u.id and p.status='active'
+      where u.role='merchant' and u.status='active'
+      group by u.id,u.name
+      order by product_count desc,u.created_at desc limit 100
+    """)).mappings().all()
+    response.headers['Cache-Control'] = 'public, max-age=20, stale-while-revalidate=60'
+    return [dict(x) for x in rows]
+
+@app.get('/api/public/pages')
+def public_internal_pages(request: Request, db: Session = Depends(get_db)):
+    role = 'visitor'
+    token = request.cookies.get('wesla_session')
+    if token:
+        session = db.scalar(select(AuthSession).where(AuthSession.token_hash == hashlib.sha256(token.encode()).hexdigest()))
+        if session:
+            actor = db.get(User, session.user_id)
+            if actor and actor.status == 'active' and actor.role in ('customer','merchant','affiliate'):
+                role = actor.role
+    rows = db.execute(text("""
+      select slug,title,audience,updated_at from wesla_internal_pages
+      where is_published=true and audience in ('all',:role,'visitor')
+      order by updated_at desc limit 100
+    """), {'role': role}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/public/pages/{slug}')
+def public_internal_page(slug: str, request: Request, db: Session = Depends(get_db)):
+    role = 'visitor'
+    token = request.cookies.get('wesla_session')
+    if token:
+        session = db.scalar(select(AuthSession).where(AuthSession.token_hash == hashlib.sha256(token.encode()).hexdigest()))
+        if session:
+            actor = db.get(User, session.user_id)
+            if actor and actor.status == 'active' and actor.role in ('customer','merchant','affiliate'):
+                role = actor.role
+    row = db.execute(text("""
+      select slug,title,body,audience,updated_at from wesla_internal_pages
+      where slug=:slug and is_published=true and audience in ('all',:role,'visitor')
+    """), {'slug': slug, 'role': role}).mappings().first()
+    if not row:
+        raise HTTPException(404, 'الصفحة غير متاحة')
+    return dict(row)
+
+@app.get('/api/admin/pages')
+def admin_list_internal_pages(user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows = db.execute(text("select id,slug,title,body,audience,is_published,created_at,updated_at from wesla_internal_pages order by updated_at desc,id desc")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/pages')
+def admin_create_internal_page(data: InternalPageIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    slug = re.sub(r'[^a-z0-9-]+', '-', data.slug.lower()).strip('-')
+    if len(slug) < 2:
+        raise HTTPException(400, 'الرابط المختصر يجب أن يحتوي على حرفين أو أكثر باللغة الإنجليزية أو أرقام')
+    if data.audience not in ('all','visitor','customer','merchant','affiliate'):
+        raise HTTPException(400, 'الجمهور المحدد غير صحيح')
+    try:
+        row = db.execute(text("""
+          insert into wesla_internal_pages(slug,title,body,audience,is_published,created_by)
+          values (:slug,:title,:body,:audience,:published,:actor)
+          returning id,slug,title,is_published
+        """), {'slug':slug,'title':data.title.strip(),'body':data.body,'audience':data.audience,'published':data.is_published,'actor':user.id}).mappings().first()
+        db.commit()
+        return dict(row)
+    except Exception:
+        db.rollback()
+        raise HTTPException(409, 'الرابط المختصر مستخدم بالفعل أو تعذر حفظ الصفحة')
+
+@app.patch('/api/admin/pages/{page_id}')
+def admin_update_internal_page(page_id: int, data: InternalPageIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    slug = re.sub(r'[^a-z0-9-]+', '-', data.slug.lower()).strip('-')
+    if len(slug) < 2 or data.audience not in ('all','visitor','customer','merchant','affiliate'):
+        raise HTTPException(400, 'بيانات الصفحة أو الجمهور غير صحيحة')
+    result = db.execute(text("""
+      update wesla_internal_pages set slug=:slug,title=:title,body=:body,audience=:audience,
+        is_published=:published,updated_at=now()
+      where id=:id returning id,slug,title,is_published
+    """), {'slug':slug,'title':data.title.strip(),'body':data.body,'audience':data.audience,'published':data.is_published,'id':page_id}).mappings().first()
+    if not result:
+        raise HTTPException(404, 'الصفحة غير موجودة')
+    db.commit()
+    return dict(result)
+
+@app.delete('/api/admin/pages/{page_id}')
+def admin_delete_internal_page(page_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    result = db.execute(text("delete from wesla_internal_pages where id=:id returning id"), {'id':page_id}).first()
+    if not result:
+        raise HTTPException(404, 'الصفحة غير موجودة')
+    db.commit()
+    return {'ok': True}
+
+@app.get('/api/admin/accounts')
+def admin_accounts(role: str = Query(default='all'), status: str = Query(default='all'), limit: int = Query(default=500, ge=1, le=1000), user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    if role not in ('all','merchant','customer','affiliate','admin') or status not in ('all','active','suspended','banned','inactive'):
+        raise HTTPException(400, 'فلتر الحسابات غير صحيح')
+    clauses = []
+    params = {'limit': limit}
+    if role != 'all':
+        clauses.append('u.role=:role'); params['role'] = role
+    if status != 'all':
+        clauses.append('u.status=:status'); params['status'] = status
+    where = ('where ' + ' and '.join(clauses)) if clauses else ''
+    rows = db.execute(text(f"""
+      select u.id,u.name,u.email,u.role,u.status,u.contact_phone,u.contact_whatsapp,u.contact_public,u.created_at,
+        (select count(*)::int from products p where p.merchant_id=u.id) as product_count,
+        (select count(*)::int from orders o where o.merchant_id=u.id) as merchant_orders,
+        (select count(*)::int from orders o where o.affiliate_id=u.id) as affiliate_orders,
+        (select count(*)::int from orders o where o.customer_phone=u.contact_phone) as customer_orders
+      from users u {where} order by u.created_at desc,u.id desc limit :limit
+    """), params).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.patch('/api/admin/accounts/{account_id}/status')
+def admin_update_account_status(account_id: int, data: AccountActionIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    if data.status not in ('active','suspended','banned'):
+        raise HTTPException(400, 'الحالة يجب أن تكون نشط أو موقوف مؤقتاً أو محظور')
+    target = db.get(User, account_id)
+    if not target:
+        raise HTTPException(404, 'الحساب غير موجود')
+    if target.role == 'admin':
+        raise HTTPException(403, 'لا يمكن تنفيذ هذا الإجراء على حساب إدارة المنصة')
+    if target.status == data.status:
+        raise HTTPException(409, 'الحساب بالفعل بهذه الحالة')
+    old_status = target.status
+    target.status = data.status
+    action = 'restore' if data.status == 'active' else ('ban' if data.status == 'banned' else 'suspend')
+    db.execute(text("insert into wesla_account_actions(target_user_id,actor_user_id,action,reason) values (:target,:actor,:action,:reason)"),
+      {'target':target.id,'actor':user.id,'action':action,'reason':data.reason.strip()})
+    db.commit()
+    return {'ok':True,'old_status':old_status,'status':target.status}
+
+@app.get('/api/admin/merchants/{merchant_id}/penalties')
+def admin_merchant_penalties(merchant_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+      select p.id,p.amount_egp,p.reason,p.status,p.admin_note,p.contract_id,p.created_at,
+             c.contract_number,c.title as contract_title
+      from wesla_merchant_penalties p left join contracts c on c.id=p.contract_id
+      where p.merchant_id=:id order by p.created_at desc
+    """), {'id':merchant_id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/merchants/{merchant_id}/penalties')
+def admin_create_merchant_penalty(merchant_id: int, data: MerchantPenaltyIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    merchant = db.get(User, merchant_id)
+    if not merchant or merchant.role != 'merchant':
+        raise HTTPException(404, 'حساب التاجر غير موجود')
+    if data.contract_id:
+        contract = db.get(Contract, data.contract_id)
+        if not contract or contract.merchant_id != merchant_id:
+            raise HTTPException(400, 'الاتفاقية لا تخص هذا التاجر')
+    row = db.execute(text("""
+      insert into wesla_merchant_penalties(merchant_id,contract_id,amount_egp,reason,created_by)
+      values (:merchant,:contract,:amount,:reason,:actor)
+      returning id,status,amount_egp,created_at
+    """), {'merchant':merchant_id,'contract':data.contract_id,'amount':data.amount_egp,'reason':data.reason.strip(),'actor':user.id}).mappings().first()
+    db.commit()
+    return dict(row)
+
+@app.post('/api/admin/merchants/penalties/{penalty_id}/decision')
+def admin_decide_merchant_penalty(penalty_id: int, data: PenaltyDecisionIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    penalty = db.execute(text("select * from wesla_merchant_penalties where id=:id for update"), {'id':penalty_id}).mappings().first()
+    if not penalty:
+        raise HTTPException(404, 'الغرامة غير موجودة')
+    if penalty['status'] != 'pending':
+        raise HTTPException(409, 'تمت مراجعة هذا السجل بالفعل')
+    if data.decision not in ('confirm','waive','dispute'):
+        raise HTTPException(400, 'القرار غير صحيح')
+    if data.decision == 'confirm':
+        contract = db.get(Contract, penalty['contract_id']) if penalty['contract_id'] else None
+        if not contract or contract.merchant_id != penalty['merchant_id'] or contract.status != 'signed':
+            raise HTTPException(400, 'لا يمكن تأكيد غرامة دون اتفاقية موقعة تخص التاجر')
+        if not contract.penalty_terms.strip() or not contract.penalty_type:
+            raise HTTPException(400, 'الاتفاقية لا تحتوي على شرط جزائي موثق')
+        if contract.penalty_type == 'fixed' and (contract.penalty_amount is None or Decimal(str(penalty['amount_egp'])) > Decimal(str(contract.penalty_amount))):
+            raise HTTPException(400, 'قيمة الغرامة تتجاوز الحد الثابت الوارد في الاتفاقية')
+    status = {'confirm':'confirmed','waive':'waived','dispute':'disputed'}[data.decision]
+    db.execute(text("update wesla_merchant_penalties set status=:status,admin_note=:note,updated_at=now() where id=:id"),
+      {'status':status,'note':data.admin_note.strip(),'id':penalty_id})
+    db.commit()
+    return {'ok':True,'status':status,'note':'تم تسجيل القرار. لا يتم خصم المبلغ آلياً من حساب التاجر.'}
+
+@app.get('/api/admin/referrals')
+def admin_referrals(user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+      select r.id,r.referral_code,r.status,r.reward_points,r.created_at,r.qualified_at,
+             inviter.id as inviter_id,inviter.name as inviter_name,inviter.email as inviter_email,
+             invited.id as invited_id,invited.name as invited_name,invited.email as invited_email
+      from wesla_referrals r
+      join users inviter on inviter.id=r.referrer_user_id
+      join users invited on invited.id=r.referred_user_id
+      order by r.created_at desc limit 500
+    """)).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/admin/referral-rewards/config')
+def admin_referral_rewards_config(user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows = db.execute(text("select feature_key,config,is_enabled from wesla_feature_settings where feature_key in ('referrals','rewards')")).mappings().all()
+    cfg = {r['feature_key']: (r['config'] or {}) for r in rows}
+    return {'referrals_enabled': bool(next((r['is_enabled'] for r in rows if r['feature_key']=='referrals'), True)),
+            'rewards_enabled': bool(next((r['is_enabled'] for r in rows if r['feature_key']=='rewards'), True)),
+            'referral_reward_points': int((cfg.get('referrals') or {}).get('referral_reward_points',0)),
+            'signup_reward_points': int((cfg.get('rewards') or {}).get('signup_reward_points',0))}
+
+@app.patch('/api/admin/referral-rewards/config')
+def admin_update_referral_rewards_config(data: ReferralRewardConfigIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    for key, points, enabled in [('referrals',data.referral_reward_points,True),('rewards',data.signup_reward_points,True)]:
+        db.execute(text("""
+          insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
+          values (:key,:enabled,'["all"]'::jsonb,jsonb_build_object(:config_key,:points),now())
+          on conflict(feature_key) do update
+          set config=wesla_feature_settings.config || excluded.config,
+              is_enabled=excluded.is_enabled,updated_at=now()
+        """), {'key':key,'enabled':enabled,'config_key':'referral_reward_points' if key=='referrals' else 'signup_reward_points','points':points})
+    db.commit()
+    return {'ok':True,'referral_reward_points':data.referral_reward_points,'signup_reward_points':data.signup_reward_points}
+
+@app.post('/api/admin/referrals/{referral_id}/qualify')
+def admin_qualify_referral(referral_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    ref = db.execute(text("select * from wesla_referrals where id=:id for update"), {'id':referral_id}).mappings().first()
+    if not ref:
+        raise HTTPException(404, 'الإحالة غير موجودة')
+    if ref['status'] != 'registered':
+        raise HTTPException(409, 'الإحالة تمت مراجعتها بالفعل')
+    config = db.execute(text("select config,is_enabled from wesla_feature_settings where feature_key='referrals'")).mappings().first()
+    points = int(((config or {}).get('config') or {}).get('referral_reward_points',0))
+    if not config or not config['is_enabled'] or points <= 0:
+        raise HTTPException(400, 'فعّل برنامج الإحالات وحدد مكافأة أكبر من صفر أولاً')
+    event_key = 'referral:' + str(referral_id)
+    db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"), {'uid':ref['referrer_user_id']})
+    inserted = db.execute(text("""
+      insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+      values (:uid,:points,'posted',:event,'referral',:rid,'مكافأة إحالة صديق مؤهلة')
+      on conflict(event_key) do nothing returning id
+    """), {'uid':ref['referrer_user_id'],'points':points,'event':event_key,'rid':referral_id}).first()
+    if not inserted:
+        raise HTTPException(409, 'تم صرف مكافأة هذه الإحالة من قبل')
+    db.execute(text("update wesla_reward_accounts set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,updated_at=now() where user_id=:uid"),
+      {'points':points,'uid':ref['referrer_user_id']})
+    db.execute(text("update wesla_referrals set status='qualified',reward_points=:points,qualified_at=now() where id=:id"),
+      {'points':points,'id':referral_id})
+    db.commit()
+    return {'ok':True,'points_awarded':points}
+
+@app.get('/api/admin/account-actions/{account_id}')
+def admin_account_action_history(account_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+      select action,reason,created_at from wesla_account_actions
+      where target_user_id=:id order by created_at desc limit 100
+    """), {'id':account_id}).mappings().all()
+    return [dict(x) for x in rows]
+
+# Friendly public routes: unknown non-API paths serve the app shell so shared links
+# and custom pages work without requiring a special /chat suffix.
+@app.get('/{full_path:path}')
+def public_spa_fallback(full_path: str):
+    if full_path.startswith(('api/','static/')):
+        raise HTTPException(404, 'Not Found')
+    return FileResponse('app/static/index.html', headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
