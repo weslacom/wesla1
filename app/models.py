@@ -261,9 +261,20 @@ class Announcement(Base):
     audience: Mapped[str]=mapped_column(String(20), default='all')
     target_url: Mapped[str]=mapped_column(String(500), default='')
     button_label: Mapped[str]=mapped_column(String(60), default='')
+    placement: Mapped[str]=mapped_column(String(30), default='top_banner')
+    priority: Mapped[int]=mapped_column(Integer, default=0)
     is_active: Mapped[bool]=mapped_column(Boolean, default=True)
     starts_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     ends_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class AnnouncementEvent(Base):
+    __tablename__='announcement_events'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    announcement_id: Mapped[int]=mapped_column(ForeignKey('announcements.id', ondelete='CASCADE'), index=True)
+    event_type: Mapped[str]=mapped_column(String(12))
+    visitor_key: Mapped[str]=mapped_column(String(64), index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
