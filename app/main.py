@@ -1938,7 +1938,8 @@ def admin_accounts(role: str = Query(default='all'), status: str = Query(default
     where = ('where ' + ' and '.join(clauses)) if clauses else ''
     rows = db.execute(text(f"""
       select u.id,u.name,u.email,u.role,u.status,u.contact_phone,u.contact_whatsapp,u.contact_public,u.created_at,
-        (select count(*)::int from products p where p.merchant_id=u.id) as product_count,
+        (select count(*)::int from products p where p.merchant_id=u.id and p.status='active') as product_count,
+        (select count(*)::int from products p where p.merchant_id=u.id and p.status='deleted') as deleted_product_count,
         (select count(*)::int from orders o where o.merchant_id=u.id) as merchant_orders,
         (select count(*)::int from orders o where o.affiliate_id=u.id) as affiliate_orders,
         (select count(*)::int from orders o where o.customer_phone=u.contact_phone) as customer_orders
