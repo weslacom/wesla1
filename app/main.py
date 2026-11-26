@@ -2152,6 +2152,8 @@ def admin_create_merchant_penalty(merchant_id: int, data: MerchantPenaltyIn, use
         contract = db.get(Contract, data.contract_id)
         if not contract or contract.merchant_id != merchant_id:
             raise HTTPException(400, 'الاتفاقية لا تخص هذا التاجر')
+        if contract.status != 'signed' or not contract.penalty_terms.strip() or not contract.penalty_type:
+            raise HTTPException(400, 'اختر اتفاقية موقعة تتضمن شرطاً جزائياً موثقاً')
     row = db.execute(text("""
       insert into wesla_merchant_penalties(merchant_id,contract_id,amount_egp,reason,created_by)
       values (:merchant,:contract,:amount,:reason,:actor)
