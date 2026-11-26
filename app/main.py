@@ -1,4 +1,4 @@
-import os, secrets, hashlib, hmac, json, base64, binascii, asyncio, re
+import os, secrets, hashlib, hmac, json, base64, binascii, asyncio, re, urllib.request, urllib.error
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text
 from .database import Base, engine, get_db, SessionLocal
 from .event_hub import event_hub
-from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement, AnnouncementEvent, Favorite, Coupon, CouponRedemption, SupportTicket, SupportMessage, WalletTransaction
+from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement, AnnouncementEvent, Favorite, Coupon, CouponRedemption, SupportTicket, SupportMessage, WalletTransaction, PasswordResetToken
 
 # Production schema is managed by Supabase migrations. Vercel instances are ephemeral.
 # Keep automatic schema creation for local development and isolated tests only.
@@ -228,6 +228,14 @@ class AnnouncementEventIn(BaseModel):
     event_type: str
     visitor_key: str = Field(min_length=24, max_length=64)
 
+class ForgotPasswordIn(BaseModel):
+    email: str = Field(min_length=5,max_length=190)
+
+class ResetPasswordIn(BaseModel):
+    email: str = Field(min_length=5,max_length=190)
+    code: str = Field(min_length=6,max_length=6)
+    new_password: str = Field(min_length=10,max_length=128)
+
 class FavoriteIn(BaseModel):
     product_id: int
 
@@ -336,6 +344,57 @@ def login(data:LoginIn,response:Response,db:Session=Depends(get_db)):
     token=secrets.token_urlsafe(32); db.add(AuthSession(token_hash=hashlib.sha256(token.encode()).hexdigest(),user_id=u.id,expires_at=datetime.now(timezone.utc)+timedelta(days=7))); db.commit()
     set_session_cookie(response,token,60*60*24*7)
     return {'user':public_user(u)}
+def send_password_reset_email(email,code):
+    api_key=os.getenv('RESEND_API_KEY','').strip()
+    sender=os.getenv('RESEND_FROM_EMAIL','').strip()
+    if not api_key or not sender:
+        return False
+    payload=json.dumps({'from':sender,'to':[email],'subject':'رمز إعادة تعيين كلمة المرور - وصلة',
+        'text':f'رمز إعادة تعيين كلمة المرور لحسابك في وصلة هو: {code}\\nصلاحية الرمز 15 دقيقة، ولا تشاركه مع أي شخص.'}).encode()
+    req=urllib.request.Request('https://api.resend.com/emails',data=payload,
+        headers={'Authorization':'Bearer '+api_key,'Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=10) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError,TimeoutError):
+        return False
+
+@app.post('/api/password/forgot')
+def forgot_password(data:ForgotPasswordIn,db:Session=Depends(get_db)):
+    generic={'message':'لو البريد الإلكتروني مسجل ومزود البريد مفعل، هيوصلك رمز صالح لمدة 15 دقيقة.'}
+    email=data.email.strip().lower()
+    user=db.scalar(select(User).where(User.email==email,User.status=='active'))
+    if not user: return generic
+    code=f'{secrets.randbelow(900000)+100000:06d}'
+    token_hash=hashlib.sha256(code.encode()).hexdigest()
+    now_utc=datetime.now(timezone.utc)
+    try:
+        sent=send_password_reset_email(email,code)
+        if not sent: return generic
+        for old in db.scalars(select(PasswordResetToken).where(PasswordResetToken.user_id==user.id,PasswordResetToken.consumed_at.is_(None))).all():
+            old.consumed_at=now_utc
+        db.add(PasswordResetToken(user_id=user.id,token_hash=token_hash,expires_at=now_utc+timedelta(minutes=15)))
+        db.commit()
+    except Exception:
+        db.rollback()
+    return generic
+
+@app.post('/api/password/reset')
+def reset_password(data:ResetPasswordIn,db:Session=Depends(get_db)):
+    email=data.email.strip().lower()
+    user=db.scalar(select(User).where(User.email==email,User.status=='active'))
+    if not user: raise HTTPException(400,'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية')
+    token_hash=hashlib.sha256(data.code.encode()).hexdigest()
+    now_utc=datetime.now(timezone.utc)
+    token=db.scalar(select(PasswordResetToken).where(PasswordResetToken.user_id==user.id,
+        PasswordResetToken.token_hash==token_hash,PasswordResetToken.consumed_at.is_(None),
+        PasswordResetToken.expires_at>now_utc).order_by(PasswordResetToken.created_at.desc()).with_for_update())
+    if not token: raise HTTPException(400,'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية')
+    user.password_hash=hash_password(data.new_password)
+    token.consumed_at=now_utc
+    db.commit()
+    return {'message':'تم تغيير كلمة المرور بنجاح. يمكنك تسجيل الدخول بكلمة المرور الجديدة.'}
+
 @app.post('/api/admin/password-login')
 def admin_password_login(data:AdminPasswordLogin,response:Response,db:Session=Depends(get_db)):
     admins=db.scalars(select(User).where(User.role=='admin',User.status=='active').order_by(User.id.asc())).all()
