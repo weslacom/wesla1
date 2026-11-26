@@ -19,6 +19,18 @@ if os.getenv('VERCEL') != '1':
     Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
 
+# Normalize invisible bidirectional control characters accidentally appended
+# when Arabic/RTL links are copied from chat or messaging apps.
+_BIDI_URL_CONTROLS = {'\u200e', '\u200f', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069', '\ufeff'}
+
+@app.middleware('http')
+async def normalize_rtl_only_url_suffix(request: Request, call_next):
+    raw_path = request.scope.get('path', '')
+    normalized = ''.join(ch for ch in raw_path if ch not in _BIDI_URL_CONTROLS)
+    if normalized == '/' and raw_path != '/':
+        return RedirectResponse(url='/', status_code=307, headers={'Cache-Control': 'no-store'})
+    return await call_next(request)
+
 @app.on_event('startup')
 def cleanup_temporary_data_every_15_days():
     # There is no Redis/in-memory cache in this application. Clean only expired
@@ -61,7 +73,7 @@ def portal_diagnostics(db:Session=Depends(get_db)):
     # Safe same-origin readiness check for the administration page.
     db.execute(text('select 1'))
     required = ['/api/admin/password-login', '/api/admin/overview', '/api/admin/contracts',
-                '/api/admin/contract-requests', '/api/admin/negotiations', '/api/admin/termination-requests', '/api/admin/accounts', '/api/admin/visitors', '/api/admin/pages', '/api/admin/referrals', '/api/admin/rewards/offers', '/api/public/merchants', '/api/public/pages']
+                '/api/admin/contract-requests', '/api/admin/negotiations', '/api/admin/termination-requests', '/api/admin/accounts', '/api/admin/visitors', '/api/admin/pages', '/api/admin/referrals', '/api/admin/rewards/offers', '/api/advanced/rewards/offers', '/api/public/merchants', '/api/public/pages']
     paths = app.openapi().get('paths', {})
     routes = {path: path in paths for path in required}
     ready = all(routes.values())
@@ -244,6 +256,11 @@ class AnnouncementIn(BaseModel):
     priority: int = Field(default=0, ge=0, le=1000)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    is_sponsored: bool = False
+    advertiser_name: str = Field(default='', max_length=180)
+    price_egp: Decimal = Field(default=Decimal('0'), ge=0, max_digits=12, decimal_places=2)
+    payment_status: str = Field(default='not_required', max_length=20)
+    payment_reference: str = Field(default='', max_length=120)
 
 class AnnouncementUpdateIn(BaseModel):
     title: str | None = Field(default=None, min_length=3, max_length=180)
@@ -256,6 +273,11 @@ class AnnouncementUpdateIn(BaseModel):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     is_active: bool | None = None
+    is_sponsored: bool | None = None
+    advertiser_name: str | None = Field(default=None, max_length=180)
+    price_egp: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    payment_status: str | None = Field(default=None, max_length=20)
+    payment_reference: str | None = Field(default=None, max_length=120)
 
 class AnnouncementEventIn(BaseModel):
     event_type: str
@@ -533,7 +555,7 @@ def apply(data:ApplicationIn,user:User=Depends(current_user),db:Session=Depends(
     a=Application(user_id=user.id,requested_role=data.role,details=data.details); db.add(a); db.commit(); return {'message':'تم إرسال طلبك للإدارة للمراجعة'}
 @app.get('/api/products')
 def products(response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
-    rows=db.scalars(select(Product).where(Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    rows=db.scalars(select(Product).join(User, User.id==Product.merchant_id).where(Product.status=='active', User.status=='active', User.role=='merchant').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
     # Public catalogue returns only buyer-facing product data, never internal commission settings.
     public=products_out(rows,db)
     for item in public:
@@ -600,7 +622,7 @@ def merchant_product_detail(product_id:int,user:User=Depends(require_role('merch
 def public_store(user_id:int,response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
     owner=db.get(User,user_id)
     if not owner or owner.role!='merchant' or owner.status!='active': raise HTTPException(404,'المتجر غير موجود')
-    rows=db.scalars(select(Product).where(Product.merchant_id==owner.id,Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    rows=db.scalars(select(Product).join(User, User.id==Product.merchant_id).where(Product.merchant_id==owner.id,Product.status=='active',User.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
     items=products_out(rows,db)
     for item in items:
         item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
@@ -731,6 +753,14 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     elif p.stock<data.quantity: raise HTTPException(409,'الكمية المطلوبة غير متاحة حالياً')
     code=data.referral_code or request.cookies.get('wesla_ref'); link=db.scalar(select(Link).where(Link.code==code)) if code else None
     affiliate_id=link.affiliate_id if link and link.product_id==p.id else None
+    customer_user_id=None
+    session_token=request.cookies.get('wesla_session')
+    if session_token:
+        active_session=db.scalar(select(AuthSession).where(AuthSession.token_hash==hashlib.sha256(session_token.encode()).hexdigest()))
+        if active_session:
+            customer=db.get(User,active_session.user_id)
+            if customer and customer.status=='active' and customer.role=='customer':
+                customer_user_id=customer.id
     chosen_price=variant.price_override if variant and variant.price_override is not None else p.price
     subtotal=(Decimal(chosen_price)*data.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     coupon=None; discount=Decimal('0.00')
@@ -749,7 +779,7 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     total=(subtotal-discount).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
     ac=(total*Decimal(p.affiliate_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if affiliate_id else Decimal('0.00')
     pc=(total*Decimal(p.platform_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,coupon_code=coupon.code if coupon else None,discount_amount=discount,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
+    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,customer_user_id=customer_user_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,coupon_code=coupon.code if coupon else None,discount_amount=discount,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
     if variant: variant.stock-=data.quantity
     p.stock-=data.quantity
     # Hide the product from all public catalogues as soon as its total stock reaches zero.
@@ -761,7 +791,7 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
         db.execute(text("insert into wesla_order_status_history(order_id,status,actor_role,note) values (:oid,:status,'system','تم استلام الطلب')"), {'oid':order.id,'status':order.status})
     if coupon:
         db.flush(); coupon.used_count+=1
-        db.add(CouponRedemption(coupon_id=coupon.id,order_id=order.id,user_id=None,discount_amount=discount))
+        db.add(CouponRedemption(coupon_id=coupon.id,order_id=order.id,user_id=customer_user_id,discount_amount=discount))
     notify_user(db,p.merchant_id,'طلب جديد على منتجك',f'رقم الطلب {order.order_number} — إجمالي {total} جنيه','/dashboard')
     if affiliate_id:
         notify_user(db,affiliate_id,'طلب جديد من رابطك التسويقي',f'رقم الطلب {order.order_number}. ستظهر عمولتك بعد تأكيد التسليم.','/dashboard')
@@ -842,6 +872,28 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
             notify_user(db,o.affiliate_id,'عمولتك أصبحت مستحقة',f'تم تسليم الطلب {o.order_number}. عمولتك {o.affiliate_commission} جنيه.')
             if Decimal(str(o.affiliate_commission or 0))>0:
                 db.add(WalletTransaction(user_id=o.affiliate_id,amount=Decimal(str(o.affiliate_commission)),kind='commission',reference_type='order',reference_id=o.id,description=f'عمولة الطلب {o.order_number}'))
+        if o.customer_user_id:
+            reward_cfg=db.execute(text("select config,is_enabled from wesla_feature_settings where feature_key='rewards'")).mappings().first()
+            points_per_100=int(((reward_cfg or {}).get('config') or {}).get('purchase_points_per_100_egp',0))
+            earned_points=(int(Decimal(str(o.total)) // Decimal('100')) * points_per_100) if reward_cfg and reward_cfg['is_enabled'] else 0
+            if earned_points>0:
+                db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"),{'uid':o.customer_user_id})
+                earned=db.execute(text("""
+                  insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+                  values (:uid,:points,'posted',:event,'purchase',:order_id,'نقاط شراء بعد تسليم الطلب')
+                  on conflict(event_key) do nothing returning id
+                """),{'uid':o.customer_user_id,'points':earned_points,'event':'purchase:'+str(o.id),'order_id':o.id}).first()
+                if earned:
+                    db.execute(text("""
+                      update wesla_reward_accounts
+                      set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,
+                          tier=case when lifetime_earned+:points>=3000 then 'platinum'
+                                    when lifetime_earned+:points>=1500 then 'gold'
+                                    when lifetime_earned+:points>=500 then 'silver' else 'basic' end,
+                          updated_at=now()
+                      where user_id=:uid
+                    """),{'uid':o.customer_user_id,'points':earned_points})
+                    notify_user(db,o.customer_user_id,'نقاط مكافأة جديدة',f'حصلت على {earned_points} نقطة بعد تسليم الطلب {o.order_number}.')
         for admin_user in db.scalars(select(User).where(User.role=='admin',User.status=='active')).all():
             notify_user(db,admin_user.id,'عمولة منصة جديدة',f'اكتمل بيع الطلب {o.order_number}. عمولة وصلة {o.platform_commission} جنيه'+(f'، وعمولة المسوق {o.affiliate_commission} جنيه.' if o.affiliate_id else '.'),'/control')
     db.commit(); return {'message':'تم تحديث حالة الطلب. تم تحديث العمولات والإشعارات فورًا.'}
@@ -888,6 +940,27 @@ def decide_payout(payout_id:int,decision:str,user:User=Depends(require_role('adm
 
 
 # Electronic agreements. Visual platform marks are not a government certificate or accredited e-signature.
+class ContractBrandAssetsIn(BaseModel):
+    signature_data_url: str | None = None
+    stamp_data_url: str | None = None
+    is_active: bool = True
+    signature_enabled: bool = True
+    stamp_enabled: bool = True
+    contract_types: list[str] = Field(default_factory=lambda: ['platform_merchant','platform_affiliate','merchant_affiliate'])
+
+def validate_brand_png(value: str | None, label: str):
+    if value is None or value == '':
+        return None
+    if not isinstance(value,str) or not value.startswith('data:image/png;base64,') or len(value)>2_000_000:
+        raise HTTPException(400, f'{label}: ارفع صورة PNG بخلفية شفافة وحجم مناسب')
+    try:
+        raw=base64.b64decode(value.split(',',1)[1],validate=True)
+    except (ValueError,binascii.Error):
+        raise HTTPException(400, f'{label}: ملف الصورة غير صالح')
+    if not raw.startswith(bytes.fromhex('89504e470d0a1a0a')) or len(raw)>1_500_000:
+        raise HTTPException(400, f'{label}: ملف PNG غير صالح أو أكبر من 1.5 ميجابايت')
+    return value
+
 class ContractIn(BaseModel):
     contract_type:str
     title:str=Field(min_length=3,max_length=180)
@@ -939,6 +1012,9 @@ def contract_snapshot_data(c):
         'penalty_percent':str(c.penalty_percent) if c.penalty_percent is not None else None,
         'termination_terms':c.termination_terms,'legal_entity_name':c.legal_entity_name,
         'platform_signer_name':c.platform_signer_name,
+        'brand_signature_snapshot':c.brand_signature_snapshot,
+        'brand_stamp_snapshot':c.brand_stamp_snapshot,
+        'brand_assets_version':c.brand_assets_version,
         'starts_at':c.starts_at.isoformat() if c.starts_at else None,
         'ends_at':c.ends_at.isoformat() if c.ends_at else None,
         'created_at':c.created_at.isoformat() if c.created_at else None,
@@ -1202,13 +1278,28 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
             signature_cards.append(f'<section class="signature-card"><div class="party-role">الإدارة</div><div class="signature-name">WESLA</div><div class="meta-row"><b>ممثل الإدارة المسجل:</b> {safe(admin_acceptance.full_name)} — {safe(admin_account.email)} — #{safe(admin_account.id)}</div><div class="meta-row"><b>وقت الاعتماد:</b> {safe(admin_acceptance.accepted_at.isoformat())}</div><div class="meta-row"><b>عنوان الاتصال المسجل:</b> {safe(admin_acceptance.ip_address or 'غير متاح')}</div><div class="meta-row"><b>بيئة المتصفح:</b> {safe(admin_acceptance.user_agent or 'غير متاحة')}</div><div class="meta-row"><b>بصمة موافقة الإدارة SHA-256:</b><span class="hash">{safe(admin_acceptance.document_hash)}</span></div><div class="signed-status">اعتماد إلكتروني مسجل من حساب الإدارة</div></section>')
         else:
             signature_cards.append('<section class="signature-card"><div class="party-role">الإدارة</div><div class="signature-name">WESLA</div><div class="meta-row">لا يوجد سجل موافقة مستقل لممثل الإدارة في هذه النسخة التاريخية؛ لا يُعرض هذا الرمز كتوقيع شخصي.</div><div class="signed-status">اعتماد ممثل الإدارة غير موثق في سجل الموافقات</div></section>')
+    brand_visual=''
+    if c.brand_signature_snapshot or c.brand_stamp_snapshot:
+        brand_visual='<div class="brand-identity">'
+        if c.brand_signature_snapshot:
+            brand_visual+=f'<img class="brand-signature-image" src="{safe(c.brand_signature_snapshot)}" alt="توقيع وصلة">'
+        if c.brand_stamp_snapshot:
+            brand_visual+=f'<img class="brand-stamp-image" src="{safe(c.brand_stamp_snapshot)}" alt="ختم وصلة">'
+        brand_visual+='</div>'
+    if c.contract_type=='merchant_affiliate':
+        signature_cards.append('<section class="signature-card"><div class="party-role">منصة وصلة</div>'+brand_visual+'<div class="meta-row">هوية بصرية للمنصة ضمن نسخة العقد؛ لا تُعد وحدها شهادة تصديق أو توقيعًا إلكترونيًا معتمدًا.</div></section>')
+    elif c.contract_type in ('platform_merchant','platform_affiliate') and brand_visual:
+        for card_index, card_html in enumerate(signature_cards):
+            if 'party-role">الإدارة' in card_html:
+                signature_cards[card_index]=card_html.replace('</section>',brand_visual+'</section>')
+                break
     signatures=''.join(signature_cards)
     verification_text='تم التحقق من تطابق بصمة النسخة النهائية مع لقطة الإصدار وبصمات الموافقات المسجلة' if verified else 'هذه نسخة تاريخية لا يتوفر لها سجل لقطة نهائية مستقل يسمح بالتحقق الآلي الكامل من تطابق المحتوى'
     verification_class='verified' if verified else 'unverified'
     snapshot_hash=final_details.get('snapshot_hash','') if final_details else ''
     html=f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>محضر الاتفاقية {safe(c.contract_number)}</title>
     <style>
-    @page{{size:A4 portrait;margin:5mm}}*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#fff}}body{{font:8px/1.24 Tahoma,Arial,sans-serif;color:#202938}}.paper{{width:100%;min-height:287mm;padding:6px 8px;border:2px double #b9974b;background:#fffdf7}}.brand{{display:flex;align-items:center;justify-content:center;margin:0 0 3px}}.brand-signature{{display:block;width:86px;height:32px}}.brand-signature svg{{width:100%;height:100%;display:block}}.heading{{border-bottom:1px solid #d8c28c;padding-bottom:6px;margin-bottom:8px}}h1{{font-size:13px;color:#80601f;margin:0}}h2{{font-size:8px;color:#34445a;margin:2px 0 0}}h3{{font-size:8.5px;color:#80601f;border-bottom:1px solid #e6d9b7;padding-bottom:2px;margin:5px 0 3px}}.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}}.cell{{background:#f8f4e9;border:1px solid #e6d9b7;padding:5px 7px;border-radius:4px;overflow-wrap:anywhere}}.cell b{{display:block;color:#80601f;font-size:9px}}.body{{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #e6d9b7;padding:4px 6px;background:#fff;border-radius:3px;font-size:7.4px;line-height:1.22}}.clauses{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}}.penalty{{background:#fff7f0;border:1px solid #c67b48;padding:6px 8px;border-radius:4px}}.signature-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px}}.signature-card{{border:1px solid #d7c18e;border-radius:3px;padding:4px;background:#fff;break-inside:avoid;overflow-wrap:anywhere}}.party-role{{font-weight:bold;color:#80601f;font-size:10px}}.signature-name{{font-family:Tahoma,Arial,sans-serif;font-size:13px;font-weight:bold;color:#203b5b;margin:3px 0 5px;min-height:18px}}.meta-row{{font-size:6.5px;margin:1px 0;color:#4b5563;overflow-wrap:anywhere}}.hash{{direction:ltr;display:block;font:8px monospace;overflow-wrap:anywhere}}.signed-status{{font-size:9px;font-weight:bold;color:#28734b;margin-top:4px}}.verified{{background:#e8f6ed;border:1px solid #78b68c;padding:7px;border-radius:4px;color:#17613a;font-weight:bold}}.unverified{{background:#fff4df;border:1px solid #d8a84e;padding:7px;border-radius:4px;color:#81520c;font-weight:bold}}.notice{{border:1px solid #c9d2df;background:#f5f7fa;padding:4px 6px;border-radius:3px;font-size:6.8px;line-height:1.2}}.closing{{text-align:center;font-weight:bold;color:#80601f;border-top:1px solid #d8c28c;margin:4px 0 0;padding-top:3px;font-size:9px}}button{{margin-top:5px;padding:5px 10px;border:0;border-radius:4px;background:#8d6a24;color:white;font:inherit}}@media(max-width:560px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.signature-grid,.clauses{{grid-template-columns:1fr}}.paper{{padding:8px}}}}@media print{{button{{display:none!important}}.paper{{break-inside:auto}}.signature-card,.cell,.penalty{{break-inside:avoid}}*{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}}}
+    @page{{size:A4 portrait;margin:5mm}}*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#fff}}body{{font:8px/1.24 Tahoma,Arial,sans-serif;color:#202938}}.paper{{width:100%;min-height:287mm;padding:6px 8px;border:2px double #b9974b;background:#fffdf7}}.brand{{display:flex;align-items:center;justify-content:center;margin:0 0 3px}}.brand-signature{{display:block;width:86px;height:32px}}.brand-signature svg{{width:100%;height:100%;display:block}}.heading{{border-bottom:1px solid #d8c28c;padding-bottom:6px;margin-bottom:8px}}h1{{font-size:13px;color:#80601f;margin:0}}h2{{font-size:8px;color:#34445a;margin:2px 0 0}}h3{{font-size:8.5px;color:#80601f;border-bottom:1px solid #e6d9b7;padding-bottom:2px;margin:5px 0 3px}}.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}}.cell{{background:#f8f4e9;border:1px solid #e6d9b7;padding:5px 7px;border-radius:4px;overflow-wrap:anywhere}}.cell b{{display:block;color:#80601f;font-size:9px}}.body{{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #e6d9b7;padding:4px 6px;background:#fff;border-radius:3px;font-size:7.4px;line-height:1.22}}.clauses{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}}.penalty{{background:#fff7f0;border:1px solid #c67b48;padding:6px 8px;border-radius:4px}}.signature-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:3px}}.brand-identity{{display:flex;align-items:center;justify-content:space-around;gap:8px;margin:4px 0}}.brand-signature-image{{max-width:68%;max-height:48px;object-fit:contain}}.brand-stamp-image{{width:62px;height:62px;object-fit:contain}}.signature-card{{border:1px solid #d7c18e;border-radius:3px;padding:4px;background:#fff;break-inside:avoid;overflow-wrap:anywhere}}.party-role{{font-weight:bold;color:#80601f;font-size:10px}}.signature-name{{font-family:Tahoma,Arial,sans-serif;font-size:13px;font-weight:bold;color:#203b5b;margin:3px 0 5px;min-height:18px}}.meta-row{{font-size:6.5px;margin:1px 0;color:#4b5563;overflow-wrap:anywhere}}.hash{{direction:ltr;display:block;font:8px monospace;overflow-wrap:anywhere}}.signed-status{{font-size:9px;font-weight:bold;color:#28734b;margin-top:4px}}.verified{{background:#e8f6ed;border:1px solid #78b68c;padding:7px;border-radius:4px;color:#17613a;font-weight:bold}}.unverified{{background:#fff4df;border:1px solid #d8a84e;padding:7px;border-radius:4px;color:#81520c;font-weight:bold}}.notice{{border:1px solid #c9d2df;background:#f5f7fa;padding:4px 6px;border-radius:3px;font-size:6.8px;line-height:1.2}}.closing{{text-align:center;font-weight:bold;color:#80601f;border-top:1px solid #d8c28c;margin:4px 0 0;padding-top:3px;font-size:9px}}button{{margin-top:5px;padding:5px 10px;border:0;border-radius:4px;background:#8d6a24;color:white;font:inherit}}@media(max-width:560px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.signature-grid,.clauses{{grid-template-columns:1fr}}.paper{{padding:8px}}}}@media print{{button{{display:none!important}}.paper{{break-inside:auto}}.signature-card,.cell,.penalty{{break-inside:avoid}}*{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}}}
     </style></head><body><main class="paper">
     <header class="brand"><span class="brand-signature"><svg viewBox="0 0 520 195" role="img" aria-label="توقيع وصلة" xmlns="http://www.w3.org/2000/svg"><path fill="#b34bdc" fill-rule="evenodd" d="M0,65 L0,79 L13,126 L29,159 L30,165 L36,172 L44,172 L54,163 L79,128 L88,147 L103,162 L112,163 L119,157 L127,141 L135,111 L137,109 L149,121 L154,114 L160,114 L160,112 L149,102 L139,86 L139,82 L133,78 L128,79 L124,86 L123,108 L116,132 L107,147 L99,139 L90,120 L87,108 L86,91 L81,86 L77,86 L72,91 L70,112 L65,125 L42,154 L30,135 L24,120 L13,69 L8,62 L3,62Z M480,50 L472,50 L467,54 L458,48 L451,48 L440,56 L434,68 L432,90 L435,100 L446,110 L457,113 L454,120 L451,122 L456,131 L455,134 L449,138 L450,141 L465,128 L472,116 L475,104 L485,94 L487,85 L495,94 L508,103 L516,103 L519,100 L518,92 L504,84 L498,78 L486,56Z M442,133 L439,132 L433,135 L421,133 L412,127 L400,113 L388,81 L371,8 L366,0 L358,0 L355,7 L365,37 L371,63 L371,84 L368,100 L359,126 L350,142 L330,161 L314,170 L312,169 L318,160 L324,143 L324,128 L321,113 L312,101 L296,96 L293,80 L281,87 L282,97 L273,97 L256,92 L264,84 L272,80 L273,76 L284,68 L279,65 L268,66 L254,75 L241,90 L241,99 L248,105 L258,108 L281,110 L278,125 L266,145 L255,160 L246,167 L234,164 L221,155 L211,145 L203,132 L217,116 L226,91 L228,79 L226,60 L217,52 L206,55 L195,72 L187,97 L187,122 L179,123 L173,120 L168,123 L164,122 L165,123 L160,127 L160,129 L173,135 L191,136 L200,152 L215,167 L228,175 L242,180 L254,180 L266,169 L290,130 L294,111 L303,112 L307,116 L310,126 L311,139 L307,151 L301,159 L298,167 L279,184 L281,191 L286,194 L298,194 L304,192 L337,172 L356,155 L370,132 L381,97 L393,125 L407,140 L415,145 L424,148 L437,147 L435,138Z"/></svg></span></header>
     <header class="heading"><h1>اتفاقية إلكترونية موحدة</h1><h2>{safe((snapshot or {}).get('title',c.title))} — مستخرج من سجل منصة وصلة</h2></header>
@@ -1286,6 +1377,38 @@ def admin_negotiations(user:User=Depends(require_role('admin')),db:Session=Depen
         c=db.get(Contract,n.contract_id); proposer=db.get(User,n.proposer_id); recipient=db.get(User,n.recipient_id)
         result.append({'id':n.id,'contract_number':c.contract_number if c else '', 'contract_title':c.title if c else '', 'proposer':proposer.name if proposer else '', 'recipient':recipient.name if recipient else '', 'proposal_text':n.proposal_text,'reason':n.reason,'response_text':n.response_text,'status':n.status,'created_at':n.created_at.isoformat()})
     return result
+
+@app.get('/api/admin/contract-brand-assets')
+def admin_get_contract_brand_assets(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    row=db.execute(text("select signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,version,updated_at,updated_by from wesla_contract_brand_assets where id=1")).mappings().first()
+    history=db.execute(text("select v.version,v.is_active,v.signature_enabled,v.stamp_enabled,v.contract_types,v.created_at,u.name as changed_by from wesla_contract_brand_asset_versions v left join users u on u.id=v.changed_by order by v.version desc limit 20")).mappings().all()
+    primary_id=db.execute(text("select value from site_settings where key='primary_admin_user_id'")).scalar() or '2'
+    return {'is_primary_admin':str(user.id)==str(primary_id),'assets':dict(row) if row else None,'history':[dict(x) for x in history]}
+
+@app.put('/api/admin/contract-brand-assets')
+def admin_update_contract_brand_assets(data:ContractBrandAssetsIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    primary_id=str(db.execute(text("select value from site_settings where key='primary_admin_user_id'")).scalar() or '2')
+    if str(user.id)!=primary_id:
+        raise HTTPException(403,'اعتماد التوقيع والختم متاح للمدير الرئيسي فقط')
+    allowed={'platform_merchant','platform_affiliate','merchant_affiliate'}
+    if not data.contract_types or any(x not in allowed for x in data.contract_types):
+        raise HTTPException(400,'حدد نوع اتفاقية واحدًا على الأقل من الأنواع المتاحة')
+    signature=validate_brand_png(data.signature_data_url,'توقيع وصلة')
+    stamp=validate_brand_png(data.stamp_data_url,'ختم وصلة')
+    current=db.execute(text("select version from wesla_contract_brand_assets where id=1 for update")).scalar()
+    version=int(current or 0)+1
+    db.execute(text("""
+      insert into wesla_contract_brand_asset_versions(version,signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,changed_by)
+      values (:version,:signature,:stamp,:active,:signature_enabled,:stamp_enabled,:types,:actor)
+    """),{'version':version,'signature':signature,'stamp':stamp,'active':data.is_active,'signature_enabled':data.signature_enabled,'stamp_enabled':data.stamp_enabled,'types':data.contract_types,'actor':user.id})
+    db.execute(text("""
+      insert into wesla_contract_brand_assets(id,signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,version,updated_by,updated_at)
+      values (1,:signature,:stamp,:active,:signature_enabled,:stamp_enabled,:types,:version,:actor,now())
+      on conflict(id) do update set signature_data_url=excluded.signature_data_url,stamp_data_url=excluded.stamp_data_url,
+        is_active=excluded.is_active,signature_enabled=excluded.signature_enabled,stamp_enabled=excluded.stamp_enabled,contract_types=excluded.contract_types,version=excluded.version,updated_by=excluded.updated_by,updated_at=now()
+    """),{'signature':signature,'stamp':stamp,'active':data.is_active,'signature_enabled':data.signature_enabled,'stamp_enabled':data.stamp_enabled,'types':data.contract_types,'version':version,'actor':user.id})
+    db.commit()
+    return {'ok':True,'version':version,'message':'تم حفظ هوية توقيع وختم وصلة. سيُطبق التحديث على العقود الجديدة فقط.'}
 
 @app.get('/api/admin/contracts')
 def admin_contracts(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
@@ -1396,7 +1519,12 @@ def contract_action(contract_id:int,action:str,user:User=Depends(require_role('a
     if not c: raise HTTPException(404,'الاتفاقية غير موجودة')
     if action=='activate':
         if c.status!='draft': raise HTTPException(409,'لا يمكن إرسال هذه النسخة في حالتها الحالية')
-        c.status='active'; contract_event(db,c,user,'sent_for_signature')
+        assets=db.execute(text("select signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,version from wesla_contract_brand_assets where id=1")).mappings().first()
+        if assets and assets['is_active'] and c.contract_type in (assets['contract_types'] or []):
+            c.brand_signature_snapshot=assets['signature_data_url'] if assets['signature_enabled'] else None
+            c.brand_stamp_snapshot=assets['stamp_data_url'] if assets['stamp_enabled'] else None
+            c.brand_assets_version=assets['version']
+        c.status='active'; contract_event(db,c,user,'sent_for_signature',{'brand_assets_version':c.brand_assets_version})
     elif action=='archive':
         if c.status=='signed': raise HTTPException(409,'العقد الموقع لا يُحذف أو يُؤرشف؛ استخدم طلب فسخ')
         c.status='archived'; contract_event(db,c,user,'archived')
@@ -1410,8 +1538,10 @@ def contract_action(contract_id:int,action:str,user:User=Depends(require_role('a
 def announcement_out(item, views=0, clicks=0):
     return {'id':item.id,'title':item.title,'body':item.body,'audience':item.audience,
         'target_url':item.target_url,'button_label':item.button_label,'placement':item.placement,
-        'priority':item.priority,'is_active':item.is_active,'views':views,'clicks':clicks,
-        'ctr':round((clicks/views*100),2) if views else 0,
+        'priority':item.priority,'is_active':item.is_active,'is_sponsored':item.is_sponsored,
+        'advertiser_name':item.advertiser_name,'price_egp':float(item.price_egp or 0),
+        'payment_status':item.payment_status,'payment_reference':item.payment_reference,
+        'views':views,'clicks':clicks,'ctr':round((clicks/views*100),2) if views else 0,
         'starts_at':item.starts_at.isoformat() if item.starts_at else None,
         'ends_at':item.ends_at.isoformat() if item.ends_at else None,
         'created_at':item.created_at.isoformat() if item.created_at else None}
@@ -1444,6 +1574,7 @@ def active_announcements(request:Request,db:Session=Depends(get_db)):
     rows=db.scalars(select(Announcement).where(
         Announcement.is_active.is_(True),
         Announcement.audience.in_(audience_values),
+        ((Announcement.is_sponsored.is_(False)) | (Announcement.payment_status == 'paid')),
         (Announcement.starts_at.is_(None) | (Announcement.starts_at <= now_utc)),
         (Announcement.ends_at.is_(None) | (Announcement.ends_at > now_utc))
     ).order_by(Announcement.priority.desc(),Announcement.created_at.desc(),Announcement.id.desc()).limit(30)).all()
@@ -1480,6 +1611,14 @@ def admin_announcements(user:User=Depends(require_role('admin')),db:Session=Depe
 def create_announcement(data:AnnouncementIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if data.audience not in ('all','visitor','customer','merchant','affiliate'):
         raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    if data.payment_status not in ('not_required','pending','paid'):
+        raise HTTPException(400,'حالة الدفع غير صحيحة')
+    if data.is_sponsored and (not data.advertiser_name.strip() or data.price_egp <= 0):
+        raise HTTPException(400,'الإعلان الممول يتطلب اسم المعلن وسعراً أكبر من صفر')
+    if data.is_sponsored and data.payment_status == 'not_required':
+        raise HTTPException(400,'حدد حالة سداد الإعلان الممول')
+    if not data.is_sponsored:
+        data.payment_status='not_required'; data.price_egp=Decimal('0'); data.payment_reference=''
     if data.placement not in ('top_banner','home_feed','product_feed'):
         raise HTTPException(400,'مكان ظهور الإعلان غير صحيح')
     target=data.target_url.strip()
@@ -1489,7 +1628,9 @@ def create_announcement(data:AnnouncementIn,user:User=Depends(require_role('admi
         raise HTTPException(400,'موعد انتهاء الإعلان يجب أن يكون بعد موعد بدايته')
     item=Announcement(title=data.title.strip(),body=data.body.strip(),audience=data.audience,
         target_url=target,button_label=data.button_label.strip(),placement=data.placement,priority=data.priority,
-        is_active=True,starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
+        is_active=True,is_sponsored=data.is_sponsored,advertiser_name=data.advertiser_name.strip(),
+        price_egp=data.price_egp,payment_status=data.payment_status,payment_reference=data.payment_reference.strip(),
+        starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
     db.add(item); db.commit(); db.refresh(item)
     return announcement_out(item)
 
@@ -1500,6 +1641,8 @@ def update_announcement(announcement_id:int,data:AnnouncementUpdateIn,user:User=
     changes=data.model_dump(exclude_unset=True)
     if 'audience' in changes and changes['audience'] not in ('all','visitor','customer','merchant','affiliate'):
         raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    if 'payment_status' in changes and changes['payment_status'] not in ('not_required','pending','paid'):
+        raise HTTPException(400,'حالة الدفع غير صحيحة')
     if 'placement' in changes and changes['placement'] not in ('top_banner','home_feed','product_feed'):
         raise HTTPException(400,'مكان ظهور الإعلان غير صحيح')
     if 'target_url' in changes:
@@ -1507,6 +1650,16 @@ def update_announcement(announcement_id:int,data:AnnouncementUpdateIn,user:User=
         if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
             raise HTTPException(400,'الرابط يجب أن يكون مسارًا داخليًا أو رابط HTTPS')
         changes['target_url']=target
+    sponsor=changes.get('is_sponsored',item.is_sponsored)
+    advertiser=changes.get('advertiser_name',item.advertiser_name) or ''
+    price=changes.get('price_egp',item.price_egp)
+    payment=changes.get('payment_status',item.payment_status)
+    if sponsor and (not advertiser.strip() or Decimal(str(price or 0)) <= 0):
+        raise HTTPException(400,'الإعلان الممول يتطلب اسم المعلن وسعراً أكبر من صفر')
+    if sponsor and payment == 'not_required':
+        raise HTTPException(400,'حدد حالة سداد الإعلان الممول')
+    if not sponsor:
+        changes.update({'payment_status':'not_required','price_egp':Decimal('0'),'payment_reference':''})
     start=changes.get('starts_at',item.starts_at)
     end=changes.get('ends_at',item.ends_at)
     if start and end and end<=start: raise HTTPException(400,'موعد انتهاء الإعلان يجب أن يكون بعد موعد بدايته')
@@ -1844,17 +1997,6 @@ def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(re
     db.commit()
     return {'ok':True,'feature_key':feature_key,'is_enabled':enabled}
 
-class RewardOfferIn(BaseModel):
-    title: str = Field(min_length=2, max_length=180)
-    description: str = Field(default='', max_length=3000)
-    points_cost: int = Field(gt=0, le=1000000)
-    discount_type: str
-    discount_value: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-    min_order_total: Decimal = Field(default=Decimal('0'), ge=0, max_digits=12, decimal_places=2)
-    max_discount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
-    coupon_valid_days: int = Field(default=30, ge=1, le=365)
-    usage_limit: int = Field(default=1, ge=1, le=1000)
-    is_active: bool = True
 
 # Wesla operational features requested by the owner: public merchant directory,
 # referral/rewards administration, visitor analytics, internal pages and account actions.
@@ -1884,7 +2026,22 @@ class PenaltyDecisionIn(BaseModel):
 
 class ReferralRewardConfigIn(BaseModel):
     referral_reward_points: int = Field(ge=0, le=100000)
-    signup_reward_points: int = Field(default=0, ge=0, le=100000)
+    purchase_points_per_100_egp: int = Field(default=0, ge=0, le=10000)
+
+class RewardOfferIn(BaseModel):
+    title: str = Field(min_length=2, max_length=180)
+    description: str = Field(default='', max_length=3000)
+    points_cost: int = Field(gt=0, le=1000000)
+    discount_type: str
+    discount_value: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    min_order_total: Decimal = Field(default=Decimal('0'), ge=0, max_digits=12, decimal_places=2)
+    max_discount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    coupon_valid_days: int = Field(default=30, ge=1, le=365)
+    usage_limit: int = Field(default=1, ge=1, le=1000)
+    is_active: bool = True
+
+class RewardRedeemIn(BaseModel):
+    request_key: str = Field(min_length=16, max_length=80)
 
 @app.post('/api/public/visit')
 def record_public_visit(data: PublicVisitIn, request: Request, db: Session = Depends(get_db)):
@@ -2043,7 +2200,7 @@ def admin_accounts(role: str = Query(default='all'), status: str = Query(default
         (select count(*)::int from products p where p.merchant_id=u.id and p.status='deleted') as deleted_product_count,
         (select count(*)::int from orders o where o.merchant_id=u.id) as merchant_orders,
         (select count(*)::int from orders o where o.affiliate_id=u.id) as affiliate_orders,
-        (select count(*)::int from orders o where o.customer_phone=u.contact_phone) as customer_orders
+        (select count(*)::int from orders o where o.customer_user_id=u.id) as customer_orders
       from users u {where} order by u.created_at desc,u.id desc limit :limit
     """), params).mappings().all()
     return [dict(x) for x in rows]
@@ -2086,6 +2243,8 @@ def admin_create_merchant_penalty(merchant_id: int, data: MerchantPenaltyIn, use
         contract = db.get(Contract, data.contract_id)
         if not contract or contract.merchant_id != merchant_id:
             raise HTTPException(400, 'الاتفاقية لا تخص هذا التاجر')
+        if contract.status != 'signed' or not contract.penalty_terms.strip() or not contract.penalty_type:
+            raise HTTPException(400, 'اختر اتفاقية موقعة تتضمن شرطاً جزائياً موثقاً')
     row = db.execute(text("""
       insert into wesla_merchant_penalties(merchant_id,contract_id,amount_egp,reason,created_by)
       values (:merchant,:contract,:amount,:reason,:actor)
@@ -2137,20 +2296,22 @@ def admin_referral_rewards_config(user: User = Depends(require_role('admin')), d
     return {'referrals_enabled': bool(next((r['is_enabled'] for r in rows if r['feature_key']=='referrals'), True)),
             'rewards_enabled': bool(next((r['is_enabled'] for r in rows if r['feature_key']=='rewards'), True)),
             'referral_reward_points': int((cfg.get('referrals') or {}).get('referral_reward_points',0)),
-            'signup_reward_points': int((cfg.get('rewards') or {}).get('signup_reward_points',0))}
+            'purchase_points_per_100_egp': int((cfg.get('rewards') or {}).get('purchase_points_per_100_egp',0))}
 
 @app.patch('/api/admin/referral-rewards/config')
 def admin_update_referral_rewards_config(data: ReferralRewardConfigIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
-    for key, points, enabled in [('referrals',data.referral_reward_points,True),('rewards',data.signup_reward_points,True)]:
-        db.execute(text("""
-          insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
-          values (:key,:enabled,'["all"]'::jsonb,jsonb_build_object(:config_key,:points),now())
-          on conflict(feature_key) do update
-          set config=wesla_feature_settings.config || excluded.config,
-              is_enabled=excluded.is_enabled,updated_at=now()
-        """), {'key':key,'enabled':enabled,'config_key':'referral_reward_points' if key=='referrals' else 'signup_reward_points','points':points})
+    db.execute(text("""
+      insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
+      values ('referrals',true,'["all"]'::jsonb,jsonb_build_object('referral_reward_points'::text,CAST(:points AS integer)),now())
+      on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,updated_at=now()
+    """), {'points':data.referral_reward_points})
+    db.execute(text("""
+      insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
+      values ('rewards',true,'["all"]'::jsonb,jsonb_build_object('purchase_points_per_100_egp'::text,CAST(:points AS integer)),now())
+      on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,updated_at=now()
+    """), {'points':data.purchase_points_per_100_egp})
     db.commit()
-    return {'ok':True,'referral_reward_points':data.referral_reward_points,'signup_reward_points':data.signup_reward_points}
+    return {'ok':True,'referral_reward_points':data.referral_reward_points,'purchase_points_per_100_egp':data.purchase_points_per_100_egp}
 
 @app.post('/api/admin/referrals/{referral_id}/qualify')
 def admin_qualify_referral(referral_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
@@ -2172,8 +2333,15 @@ def admin_qualify_referral(referral_id: int, user: User = Depends(require_role('
     """), {'uid':ref['referrer_user_id'],'points':points,'event':event_key,'rid':referral_id}).first()
     if not inserted:
         raise HTTPException(409, 'تم صرف مكافأة هذه الإحالة من قبل')
-    db.execute(text("update wesla_reward_accounts set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,updated_at=now() where user_id=:uid"),
-      {'points':points,'uid':ref['referrer_user_id']})
+    db.execute(text("""
+      update wesla_reward_accounts
+      set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,
+          tier=case when lifetime_earned+:points>=3000 then 'platinum'
+                    when lifetime_earned+:points>=1500 then 'gold'
+                    when lifetime_earned+:points>=500 then 'silver' else 'basic' end,
+          updated_at=now()
+      where user_id=:uid
+    """), {'points':points,'uid':ref['referrer_user_id']})
     db.execute(text("update wesla_referrals set status='qualified',reward_points=:points,qualified_at=now() where id=:id"),
       {'points':points,'id':referral_id})
     db.commit()
@@ -2187,6 +2355,76 @@ def admin_account_action_history(account_id: int, user: User = Depends(require_r
     """), {'id':account_id}).mappings().all()
     return [dict(x) for x in rows]
 
+
+@app.get('/api/advanced/rewards/offers')
+def advanced_reward_offers(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not wesla_feature_enabled(db, 'rewards', True): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
+    rows=db.execute(text("""
+      select id,title,description,points_cost,discount_type,discount_value,min_order_total,max_discount,
+             coupon_valid_days,usage_limit
+      from wesla_reward_offers where is_active=true and points_cost>0
+      order by points_cost asc,id desc limit 100
+    """)).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/advanced/rewards/redeem/{offer_id}')
+def redeem_reward_offer(offer_id: int, data: RewardRedeemIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not wesla_feature_enabled(db, 'rewards', True): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', data.request_key):
+        raise HTTPException(400, 'مرجع الاستبدال غير صالح')
+    existing=db.execute(text("""
+      select c.code,c.ends_at,r.points_spent
+      from wesla_reward_redemptions r join coupons c on c.id=r.coupon_id
+      where r.user_id=:uid and r.request_key=:key
+    """), {'uid':user.id,'key':data.request_key}).mappings().first()
+    if existing:
+        return {'ok':True,'coupon_code':existing['code'],'points_spent':existing['points_spent'],'ends_at':existing['ends_at']}
+    offer=db.execute(text("select * from wesla_reward_offers where id=:id and is_active=true for update"), {'id':offer_id}).mappings().first()
+    if not offer:
+        raise HTTPException(404, 'المكافأة غير متاحة')
+    db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"), {'uid':user.id})
+    account=db.execute(text("select points_available from wesla_reward_accounts where user_id=:uid for update"), {'uid':user.id}).mappings().first()
+    cost=int(offer['points_cost'])
+    if int(account['points_available'])<cost:
+        raise HTTPException(400, 'رصيد النقاط غير كافٍ لاستبدال المكافأة')
+    now=datetime.now(timezone.utc)
+    coupon=Coupon(
+      code='WESLA'+secrets.token_hex(4).upper(),
+      discount_type=offer['discount_type'],
+      discount_value=offer['discount_value'],
+      min_order_total=offer['min_order_total'],
+      max_discount=offer['max_discount'],
+      usage_limit=int(offer['usage_limit']),
+      used_count=0,
+      starts_at=now,
+      ends_at=now+timedelta(days=int(offer['coupon_valid_days'])),
+      is_active=True,
+      created_by=user.id
+    )
+    db.add(coupon); db.flush()
+    redemption=db.execute(text("""
+      insert into wesla_reward_redemptions(offer_id,user_id,coupon_id,points_spent,request_key)
+      values (:offer,:uid,:coupon,:points,:request_key)
+      on conflict(request_key) do nothing returning id
+    """), {'offer':offer_id,'uid':user.id,'coupon':coupon.id,'points':cost,'request_key':data.request_key}).first()
+    if not redemption:
+        db.rollback()
+        existing=db.execute(text("""
+          select c.code,c.ends_at,r.points_spent from wesla_reward_redemptions r
+          join coupons c on c.id=r.coupon_id where r.user_id=:uid and r.request_key=:key
+        """), {'uid':user.id,'key':data.request_key}).mappings().first()
+        if existing:
+            return {'ok':True,'coupon_code':existing['code'],'points_spent':existing['points_spent'],'ends_at':existing['ends_at']}
+        raise HTTPException(409, 'مرجع الاستبدال مستخدم بالفعل')
+    db.execute(text("""
+      insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+      values (:uid,:delta,'posted',:event,'reward_redemption',:offer,'استبدال نقاط بمكافأة')
+      on conflict(event_key) do nothing
+    """), {'uid':user.id,'delta':-cost,'event':'reward-redeem:'+data.request_key,'offer':offer_id})
+    db.execute(text("update wesla_reward_accounts set points_available=points_available-:points,updated_at=now() where user_id=:uid"),
+      {'points':cost,'uid':user.id})
+    db.commit()
+    return {'ok':True,'coupon_code':coupon.code,'points_spent':cost,'ends_at':coupon.ends_at}
 
 @app.get('/api/admin/rewards/offers')
 def admin_reward_offers(user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
