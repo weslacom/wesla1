@@ -80,7 +80,7 @@ function getWeslaVisitorKey(){
  return weslaVisitorKey;
 }
 function trackAnnouncementEvent(id,event_type){api('/api/announcements/'+id+'/event',{method:'POST',body:JSON.stringify({event_type,visitor_key:getWeslaVisitorKey()})}).catch(()=>{});}
-function loadAnnouncements(){try{
+async function loadAnnouncements(){try{
  const rows=await api('/api/announcements/active');
  const host=$('#announcementBanner');
  const render=(list)=>list.map(a=>'<article class="announcement-card"><div><b>📣 '+esc(a.title)+'</b><p>'+esc(a.body)+'</p></div>'+(a.target_url&&a.button_label?'<a href="'+escAttr(a.target_url)+'" onclick="trackAnnouncementEvent('+a.id+',\'click\')">'+esc(a.button_label)+'</a>':'')+'</article>').join('');
