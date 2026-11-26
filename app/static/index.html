@@ -73,7 +73,7 @@ async function myContracts(){try{let a=await api('/api/contracts/my');$('#dashCo
 async function acceptMyContract(e,id){e.preventDefault();let f=new FormData(e.target);try{let d=await api('/api/contracts/'+id+'/accept',{method:'POST',body:JSON.stringify({full_name:f.get('full_name'),accepted:f.get('accepted')==='on'})});msg(d.message);myContracts()}catch(x){msg(x.message,true)}}
 function openAccountSettings(){if(!me)return;$('#accountSettings').classList.remove('hidden');$('#dashContent').classList.add('hidden');$('#accountSettings').scrollIntoView({behavior:'smooth',block:'start'})}function closeAccountSettings(){$('#accountSettings').classList.add('hidden');$('#dashContent').classList.remove('hidden')}async function logout(){try{await api('/api/logout',{method:'POST'})}finally{me=null;location.replace('/')}}
 
-async let weslaVisitorKey=null;
+let weslaVisitorKey=null;
 function getWeslaVisitorKey(){
  if(weslaVisitorKey)return weslaVisitorKey;
  try{weslaVisitorKey=localStorage.getItem('wesla_visitor_key');if(!weslaVisitorKey){const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);weslaVisitorKey=Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');localStorage.setItem('wesla_visitor_key',weslaVisitorKey)}}catch(_){weslaVisitorKey=Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join('')}
