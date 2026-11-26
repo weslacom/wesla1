@@ -120,6 +120,9 @@ class Contract(Base):
     penalty_percent: Mapped[float|None]=mapped_column(Numeric(5,2), nullable=True)
     termination_terms: Mapped[str]=mapped_column(Text, default='')
     final_hash: Mapped[str|None]=mapped_column(String(64), nullable=True)
+    brand_signature_snapshot: Mapped[str|None]=mapped_column(Text, nullable=True)
+    brand_stamp_snapshot: Mapped[str|None]=mapped_column(Text, nullable=True)
+    brand_assets_version: Mapped[int|None]=mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 
 class ContractAcceptance(Base):
