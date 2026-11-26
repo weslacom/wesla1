@@ -109,7 +109,7 @@ function trackAnnouncementEvent(id,event_type){api('/api/announcements/'+id+'/ev
 async function loadAnnouncements(){try{
  const rows=await api('/api/announcements/active');
  const host=$('#announcementBanner');
- const render=(list)=>list.map(a=>'<article class="announcement-card"><div><b>📣 '+esc(a.title)+'</b><p>'+esc(a.body)+'</p></div>'+(a.target_url&&a.button_label?'<a href="'+escAttr(a.target_url)+'" onclick="trackAnnouncementEvent('+a.id+',\'click\')">'+esc(a.button_label)+'</a>':'')+'</article>').join('');
+ const render=(list)=>list.map(a=>'<article class="announcement-card">'+(a.is_sponsored?'<span class="small" style="color:#ffb078">إعلان ممول</span>':'')+'<div><b>📣 '+esc(a.title)+'</b><p>'+esc(a.body)+'</p>'+(a.is_sponsored&&a.advertiser_name?'<span class="small">بواسطة '+esc(a.advertiser_name)+'</span>':'')+'</div>'+(a.target_url&&a.button_label?'<a href="'+escAttr(a.target_url)+'" onclick="trackAnnouncementEvent('+a.id+',\'click\')">'+esc(a.button_label)+'</a>':'')+'</article>').join('');
  const top=rows.filter(a=>a.placement==='top_banner');
  host.innerHTML=render(top);host.classList.toggle('hidden',!top.length);
  const ensureHost=(id,before)=>{let el=document.getElementById(id);if(!el){el=document.createElement('div');el.id=id;el.className='wrap';before.parentNode.insertBefore(el,before)}return el};
