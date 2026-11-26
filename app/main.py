@@ -723,6 +723,14 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     elif p.stock<data.quantity: raise HTTPException(409,'الكمية المطلوبة غير متاحة حالياً')
     code=data.referral_code or request.cookies.get('wesla_ref'); link=db.scalar(select(Link).where(Link.code==code)) if code else None
     affiliate_id=link.affiliate_id if link and link.product_id==p.id else None
+    customer_user_id=None
+    session_token=request.cookies.get('wesla_session')
+    if session_token:
+        active_session=db.scalar(select(AuthSession).where(AuthSession.token_hash==hashlib.sha256(session_token.encode()).hexdigest()))
+        if active_session:
+            customer=db.get(User,active_session.user_id)
+            if customer and customer.status=='active' and customer.role=='customer':
+                customer_user_id=customer.id
     chosen_price=variant.price_override if variant and variant.price_override is not None else p.price
     subtotal=(Decimal(chosen_price)*data.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     coupon=None; discount=Decimal('0.00')
@@ -741,7 +749,7 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     total=(subtotal-discount).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
     ac=(total*Decimal(p.affiliate_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if affiliate_id else Decimal('0.00')
     pc=(total*Decimal(p.platform_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,coupon_code=coupon.code if coupon else None,discount_amount=discount,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
+    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,customer_user_id=customer_user_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,coupon_code=coupon.code if coupon else None,discount_amount=discount,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
     if variant: variant.stock-=data.quantity
     p.stock-=data.quantity
     # Hide the product from all public catalogues as soon as its total stock reaches zero.
@@ -750,7 +758,7 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     db.add(order)
     if coupon:
         db.flush(); coupon.used_count+=1
-        db.add(CouponRedemption(coupon_id=coupon.id,order_id=order.id,user_id=None,discount_amount=discount))
+        db.add(CouponRedemption(coupon_id=coupon.id,order_id=order.id,user_id=customer_user_id,discount_amount=discount))
     notify_user(db,p.merchant_id,'طلب جديد على منتجك',f'رقم الطلب {order.order_number} — إجمالي {total} جنيه','/dashboard')
     if affiliate_id:
         notify_user(db,affiliate_id,'طلب جديد من رابطك التسويقي',f'رقم الطلب {order.order_number}. ستظهر عمولتك بعد تأكيد التسليم.','/dashboard')
@@ -811,6 +819,28 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
             notify_user(db,o.affiliate_id,'عمولتك أصبحت مستحقة',f'تم تسليم الطلب {o.order_number}. عمولتك {o.affiliate_commission} جنيه.')
             if Decimal(str(o.affiliate_commission or 0))>0:
                 db.add(WalletTransaction(user_id=o.affiliate_id,amount=Decimal(str(o.affiliate_commission)),kind='commission',reference_type='order',reference_id=o.id,description=f'عمولة الطلب {o.order_number}'))
+        if o.customer_user_id:
+            reward_cfg=db.execute(text("select config,is_enabled from wesla_feature_settings where feature_key='rewards'")).mappings().first()
+            points_per_100=int(((reward_cfg or {}).get('config') or {}).get('purchase_points_per_100_egp',0))
+            earned_points=(int(Decimal(str(o.total)) // Decimal('100')) * points_per_100) if reward_cfg and reward_cfg['is_enabled'] else 0
+            if earned_points>0:
+                db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"),{'uid':o.customer_user_id})
+                earned=db.execute(text("""
+                  insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+                  values (:uid,:points,'posted',:event,'purchase',:order_id,'نقاط شراء بعد تسليم الطلب')
+                  on conflict(event_key) do nothing returning id
+                """),{'uid':o.customer_user_id,'points':earned_points,'event':'purchase:'+str(o.id),'order_id':o.id}).first()
+                if earned:
+                    db.execute(text("""
+                      update wesla_reward_accounts
+                      set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,
+                          tier=case when lifetime_earned+:points>=3000 then 'platinum'
+                                    when lifetime_earned+:points>=1500 then 'gold'
+                                    when lifetime_earned+:points>=500 then 'silver' else 'basic' end,
+                          updated_at=now()
+                      where user_id=:uid
+                    """),{'uid':o.customer_user_id,'points':earned_points})
+                    notify_user(db,o.customer_user_id,'نقاط مكافأة جديدة',f'حصلت على {earned_points} نقطة بعد تسليم الطلب {o.order_number}.')
         for admin_user in db.scalars(select(User).where(User.role=='admin',User.status=='active')).all():
             notify_user(db,admin_user.id,'عمولة منصة جديدة',f'اكتمل بيع الطلب {o.order_number}. عمولة وصلة {o.platform_commission} جنيه'+(f'، وعمولة المسوق {o.affiliate_commission} جنيه.' if o.affiliate_id else '.'),'/control')
     db.commit(); return {'message':'تم تحديث حالة الطلب. تم تحديث العمولات والإشعارات فورًا.'}
@@ -1831,7 +1861,22 @@ class PenaltyDecisionIn(BaseModel):
 
 class ReferralRewardConfigIn(BaseModel):
     referral_reward_points: int = Field(ge=0, le=100000)
-    signup_reward_points: int = Field(default=0, ge=0, le=100000)
+    purchase_points_per_100_egp: int = Field(default=0, ge=0, le=10000)
+
+class RewardOfferIn(BaseModel):
+    title: str = Field(min_length=2, max_length=180)
+    description: str = Field(default='', max_length=3000)
+    points_cost: int = Field(gt=0, le=1000000)
+    discount_type: str
+    discount_value: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    min_order_total: Decimal = Field(default=Decimal('0'), ge=0, max_digits=12, decimal_places=2)
+    max_discount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    coupon_valid_days: int = Field(default=30, ge=1, le=365)
+    usage_limit: int = Field(default=1, ge=1, le=1000)
+    is_active: bool = True
+
+class RewardRedeemIn(BaseModel):
+    request_key: str = Field(min_length=16, max_length=80)
 
 @app.post('/api/public/visit')
 def record_public_visit(data: PublicVisitIn, request: Request, db: Session = Depends(get_db)):
@@ -2084,20 +2129,22 @@ def admin_referral_rewards_config(user: User = Depends(require_role('admin')), d
     return {'referrals_enabled': bool(next((r['is_enabled'] for r in rows if r['feature_key']=='referrals'), True)),
             'rewards_enabled': bool(next((r['is_enabled'] for r in rows if r['feature_key']=='rewards'), True)),
             'referral_reward_points': int((cfg.get('referrals') or {}).get('referral_reward_points',0)),
-            'signup_reward_points': int((cfg.get('rewards') or {}).get('signup_reward_points',0))}
+            'purchase_points_per_100_egp': int((cfg.get('rewards') or {}).get('purchase_points_per_100_egp',0))}
 
 @app.patch('/api/admin/referral-rewards/config')
 def admin_update_referral_rewards_config(data: ReferralRewardConfigIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
-    for key, points, enabled in [('referrals',data.referral_reward_points,True),('rewards',data.signup_reward_points,True)]:
-        db.execute(text("""
-          insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
-          values (:key,:enabled,'["all"]'::jsonb,jsonb_build_object(:config_key,:points),now())
-          on conflict(feature_key) do update
-          set config=wesla_feature_settings.config || excluded.config,
-              is_enabled=excluded.is_enabled,updated_at=now()
-        """), {'key':key,'enabled':enabled,'config_key':'referral_reward_points' if key=='referrals' else 'signup_reward_points','points':points})
+    db.execute(text("""
+      insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
+      values ('referrals',true,'["all"]'::jsonb,jsonb_build_object('referral_reward_points',:points),now())
+      on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,is_enabled=true,updated_at=now()
+    """), {'points':data.referral_reward_points})
+    db.execute(text("""
+      insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
+      values ('rewards',true,'["all"]'::jsonb,jsonb_build_object('purchase_points_per_100_egp',:points),now())
+      on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,is_enabled=true,updated_at=now()
+    """), {'points':data.purchase_points_per_100_egp})
     db.commit()
-    return {'ok':True,'referral_reward_points':data.referral_reward_points,'signup_reward_points':data.signup_reward_points}
+    return {'ok':True,'referral_reward_points':data.referral_reward_points,'purchase_points_per_100_egp':data.purchase_points_per_100_egp}
 
 @app.post('/api/admin/referrals/{referral_id}/qualify')
 def admin_qualify_referral(referral_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
@@ -2119,8 +2166,15 @@ def admin_qualify_referral(referral_id: int, user: User = Depends(require_role('
     """), {'uid':ref['referrer_user_id'],'points':points,'event':event_key,'rid':referral_id}).first()
     if not inserted:
         raise HTTPException(409, 'تم صرف مكافأة هذه الإحالة من قبل')
-    db.execute(text("update wesla_reward_accounts set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,updated_at=now() where user_id=:uid"),
-      {'points':points,'uid':ref['referrer_user_id']})
+    db.execute(text("""
+      update wesla_reward_accounts
+      set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,
+          tier=case when lifetime_earned+:points>=3000 then 'platinum'
+                    when lifetime_earned+:points>=1500 then 'gold'
+                    when lifetime_earned+:points>=500 then 'silver' else 'basic' end,
+          updated_at=now()
+      where user_id=:uid
+    """), {'points':points,'uid':ref['referrer_user_id']})
     db.execute(text("update wesla_referrals set status='qualified',reward_points=:points,qualified_at=now() where id=:id"),
       {'points':points,'id':referral_id})
     db.commit()
@@ -2133,6 +2187,117 @@ def admin_account_action_history(account_id: int, user: User = Depends(require_r
       where target_user_id=:id order by created_at desc limit 100
     """), {'id':account_id}).mappings().all()
     return [dict(x) for x in rows]
+
+
+@app.get('/api/advanced/rewards/offers')
+def advanced_reward_offers(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows=db.execute(text("""
+      select id,title,description,points_cost,discount_type,discount_value,min_order_total,max_discount,
+             coupon_valid_days,usage_limit
+      from wesla_reward_offers where is_active=true and points_cost>0
+      order by points_cost asc,id desc limit 100
+    """)).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/advanced/rewards/redeem/{offer_id}')
+def redeem_reward_offer(offer_id: int, data: RewardRedeemIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', data.request_key):
+        raise HTTPException(400, 'مرجع الاستبدال غير صالح')
+    existing=db.execute(text("""
+      select c.code,c.ends_at,r.points_spent
+      from wesla_reward_redemptions r join coupons c on c.id=r.coupon_id
+      where r.user_id=:uid and r.request_key=:key
+    """), {'uid':user.id,'key':data.request_key}).mappings().first()
+    if existing:
+        return {'ok':True,'coupon_code':existing['code'],'points_spent':existing['points_spent'],'ends_at':existing['ends_at']}
+    offer=db.execute(text("select * from wesla_reward_offers where id=:id and is_active=true for update"), {'id':offer_id}).mappings().first()
+    if not offer:
+        raise HTTPException(404, 'المكافأة غير متاحة')
+    db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"), {'uid':user.id})
+    account=db.execute(text("select points_available from wesla_reward_accounts where user_id=:uid for update"), {'uid':user.id}).mappings().first()
+    cost=int(offer['points_cost'])
+    if int(account['points_available'])<cost:
+        raise HTTPException(400, 'رصيد النقاط غير كافٍ لاستبدال المكافأة')
+    now=datetime.now(timezone.utc)
+    coupon=Coupon(
+      code='WESLA'+secrets.token_hex(4).upper(),
+      discount_type=offer['discount_type'],
+      discount_value=offer['discount_value'],
+      min_order_total=offer['min_order_total'],
+      max_discount=offer['max_discount'],
+      usage_limit=int(offer['usage_limit']),
+      used_count=0,
+      starts_at=now,
+      ends_at=now+timedelta(days=int(offer['coupon_valid_days'])),
+      is_active=True,
+      created_by=user.id
+    )
+    db.add(coupon); db.flush()
+    redemption=db.execute(text("""
+      insert into wesla_reward_redemptions(offer_id,user_id,coupon_id,points_spent,request_key)
+      values (:offer,:uid,:coupon,:points,:request_key)
+      on conflict(request_key) do nothing returning id
+    """), {'offer':offer_id,'uid':user.id,'coupon':coupon.id,'points':cost,'request_key':data.request_key}).first()
+    if not redemption:
+        db.rollback()
+        existing=db.execute(text("""
+          select c.code,c.ends_at,r.points_spent from wesla_reward_redemptions r
+          join coupons c on c.id=r.coupon_id where r.user_id=:uid and r.request_key=:key
+        """), {'uid':user.id,'key':data.request_key}).mappings().first()
+        if existing:
+            return {'ok':True,'coupon_code':existing['code'],'points_spent':existing['points_spent'],'ends_at':existing['ends_at']}
+        raise HTTPException(409, 'مرجع الاستبدال مستخدم بالفعل')
+    db.execute(text("""
+      insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+      values (:uid,:delta,'posted',:event,'reward_redemption',:offer,'استبدال نقاط بمكافأة')
+      on conflict(event_key) do nothing
+    """), {'uid':user.id,'delta':-cost,'event':'reward-redeem:'+data.request_key,'offer':offer_id})
+    db.execute(text("update wesla_reward_accounts set points_available=points_available-:points,updated_at=now() where user_id=:uid"),
+      {'points':cost,'uid':user.id})
+    db.commit()
+    return {'ok':True,'coupon_code':coupon.code,'points_spent':cost,'ends_at':coupon.ends_at}
+
+@app.get('/api/admin/rewards/offers')
+def admin_reward_offers(user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows=db.execute(text("select * from wesla_reward_offers order by created_at desc,id desc")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/rewards/offers')
+def admin_create_reward_offer(data: RewardOfferIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    if data.discount_type not in ('fixed','percent'):
+        raise HTTPException(400,'نوع الخصم يجب أن يكون مبلغاً ثابتاً أو نسبة مئوية')
+    if data.discount_type=='percent' and data.discount_value>100:
+        raise HTTPException(400,'نسبة الخصم لا يمكن أن تتجاوز 100%')
+    row=db.execute(text("""
+      insert into wesla_reward_offers(title,description,points_cost,discount_type,discount_value,min_order_total,max_discount,coupon_valid_days,usage_limit,is_active,created_by)
+      values (:title,:description,:points,:type,:value,:minimum,:maximum,:days,:limit,:active,:actor)
+      returning id
+    """), {'title':data.title.strip(),'description':data.description,'points':data.points_cost,'type':data.discount_type,'value':data.discount_value,'minimum':data.min_order_total,'maximum':data.max_discount,'days':data.coupon_valid_days,'limit':data.usage_limit,'active':data.is_active,'actor':user.id}).first()
+    db.commit()
+    return {'ok':True,'id':row.id}
+
+@app.patch('/api/admin/rewards/offers/{offer_id}')
+def admin_update_reward_offer(offer_id: int, data: RewardOfferIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    if data.discount_type not in ('fixed','percent') or (data.discount_type=='percent' and data.discount_value>100):
+        raise HTTPException(400,'بيانات الخصم غير صحيحة')
+    result=db.execute(text("""
+      update wesla_reward_offers set title=:title,description=:description,points_cost=:points,
+        discount_type=:type,discount_value=:value,min_order_total=:minimum,max_discount=:maximum,
+        coupon_valid_days=:days,usage_limit=:limit,is_active=:active,updated_at=now()
+      where id=:id returning id
+    """), {'title':data.title.strip(),'description':data.description,'points':data.points_cost,'type':data.discount_type,'value':data.discount_value,'minimum':data.min_order_total,'maximum':data.max_discount,'days':data.coupon_valid_days,'limit':data.usage_limit,'active':data.is_active,'id':offer_id}).first()
+    if not result:
+        raise HTTPException(404,'المكافأة غير موجودة')
+    db.commit()
+    return {'ok':True}
+
+@app.delete('/api/admin/rewards/offers/{offer_id}')
+def admin_disable_reward_offer(offer_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    result=db.execute(text("update wesla_reward_offers set is_active=false,updated_at=now() where id=:id returning id"), {'id':offer_id}).first()
+    if not result:
+        raise HTTPException(404,'المكافأة غير موجودة')
+    db.commit()
+    return {'ok':True}
 
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
 # and custom pages work without requiring a special /chat suffix.
