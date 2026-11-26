@@ -270,7 +270,7 @@ class CouponUpdateIn(BaseModel):
     ends_at: datetime | None = None
 
 
-class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
+class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128); referral_code:str|None=Field(default=None,max_length=32)
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
 class AdminPasswordChange(BaseModel): current_password:str; new_password:str=Field(min_length=10,max_length=128)
@@ -338,8 +338,17 @@ def control_page():
 def register(data:RegisterIn,db:Session=Depends(get_db)):
     email=str(data.email).lower()
     if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,'البريد الإلكتروني مسجل بالفعل')
+    referrer=None
+    referral_code=(data.referral_code or '').strip().upper()
+    if referral_code:
+        referrer=db.execute(text("select user_id from wesla_referral_codes where upper(code)=:code"),{'code':referral_code}).first()
+        if not referrer: raise HTTPException(400,'كود الدعوة غير صحيح')
     u=User(name=data.name.strip(),email=email,password_hash=hash_password(data.password),role='customer')
-    db.add(u); db.commit(); db.refresh(u); return {'message':'تم إنشاء الحساب. يمكنك التقديم كتاجر أو مسوق.','user':public_user(u)}
+    db.add(u); db.commit(); db.refresh(u)
+    if referrer and int(referrer.user_id)!=u.id:
+        db.execute(text("insert into wesla_referrals(referrer_user_id,referred_user_id,referral_code,status) values (:referrer,:referred,:code,'registered') on conflict(referred_user_id) do nothing"),{'referrer':int(referrer.user_id),'referred':u.id,'code':referral_code})
+        db.commit()
+    return {'message':'تم إنشاء الحساب. يمكنك التقديم كتاجر أو مسوق.','user':public_user(u)}
 @app.post('/api/login')
 def login(data:LoginIn,response:Response,db:Session=Depends(get_db)):
     u=db.scalar(select(User).where(User.email==str(data.email).lower()))
@@ -1691,6 +1700,37 @@ def advanced_academy(audience:str='all',db:Session=Depends(get_db)):
       order by created_at desc limit 100
     """),{'audience':audience}).mappings().all()
     return [dict(x) for x in rows]
+
+@app.post('/api/admin/advanced/rewards/adjust')
+def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    try:
+        target_id=int(data.get('user_id'))
+        delta=int(data.get('delta'))
+    except (TypeError,ValueError):
+        raise HTTPException(400,'رقم المستخدم وعدد النقاط مطلوبان')
+    event_key=str(data.get('event_key','')).strip()
+    description=str(data.get('description','تسوية نقاط بواسطة الإدارة')).strip()[:240]
+    if delta==0 or abs(delta)>1000000: raise HTTPException(400,'عدد النقاط غير صالح')
+    if not re.fullmatch(r'[A-Za-z0-9:_-]{8,120}',event_key): raise HTTPException(400,'مرجع العملية غير صالح')
+    if not db.get(User,target_id): raise HTTPException(404,'المستخدم غير موجود')
+    db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"),{'uid':target_id})
+    account=db.execute(text("select points_available from wesla_reward_accounts where user_id=:uid for update"),{'uid':target_id}).mappings().first()
+    if delta<0 and int(account['points_available']) < abs(delta): raise HTTPException(400,'رصيد النقاط غير كافٍ للخصم')
+    ledger=db.execute(text("""
+      insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+      values (:uid,:delta,'posted',:event_key,'admin_adjustment',:admin_id,:description)
+      on conflict(event_key) do nothing returning id
+    """),{'uid':target_id,'delta':delta,'event_key':event_key,'admin_id':user.id,'description':description}).first()
+    if not ledger: raise HTTPException(409,'تم تسجيل هذه العملية من قبل')
+    db.execute(text("""
+      update wesla_reward_accounts
+      set points_available=points_available+:delta,
+          lifetime_earned=greatest(0,lifetime_earned+case when :delta>0 then :delta else 0 end),
+          updated_at=now()
+      where user_id=:uid
+    """),{'uid':target_id,'delta':delta})
+    db.commit()
+    return {'ok':True,'ledger_id':ledger.id,'user_id':target_id,'delta':delta}
 
 @app.get('/api/admin/advanced/settings')
 def admin_advanced_settings(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
