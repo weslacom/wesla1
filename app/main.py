@@ -1735,8 +1735,8 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
     return {'ok':True,'ledger_id':ledger.id,'user_id':target_id,'delta':delta}
 
 FEATURE_READY = {
-    'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
-    'achievements': True, 'academy': True,
+    'referrals': True, 'rewards': True, 'trends': False, 'challenges': False,
+    'achievements': False, 'academy': False,
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
     'fraud_detection': False, 'admin_activity_log': False, 'smart_marketer_matching': False,
     'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
