@@ -58,6 +58,11 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     finally:
         db.close()
 
+    merchant_login=merchant_client.post('/api/login',json={
+        'email':'merchant@wesla.test','password':'MerchantPass123!'
+    })
+    assert merchant_login.status_code==200, merchant_login.text
+
     product=merchant_client.post('/api/merchant/products',json={'title':'اختبار','description':'منتج','price':125,'stock':4,'affiliate_rate':12,'platform_rate':5})
     assert product.status_code==200, product.text
     second_product=merchant_client.post('/api/merchant/products',json={'title':'اختبار ثانٍ','description':'منتج آخر','price':95,'stock':3,'affiliate_rate':10,'platform_rate':5})
