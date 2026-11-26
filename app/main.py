@@ -525,7 +525,7 @@ def apply(data:ApplicationIn,user:User=Depends(current_user),db:Session=Depends(
     a=Application(user_id=user.id,requested_role=data.role,details=data.details); db.add(a); db.commit(); return {'message':'تم إرسال طلبك للإدارة للمراجعة'}
 @app.get('/api/products')
 def products(response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
-    rows=db.scalars(select(Product).where(Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    rows=db.scalars(select(Product).join(User, User.id==Product.merchant_id).where(Product.status=='active', User.status=='active', User.role=='merchant').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
     # Public catalogue returns only buyer-facing product data, never internal commission settings.
     public=products_out(rows,db)
     for item in public:
@@ -592,7 +592,7 @@ def merchant_product_detail(product_id:int,user:User=Depends(require_role('merch
 def public_store(user_id:int,response:Response,limit:int=Query(default=48,ge=1,le=100),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
     owner=db.get(User,user_id)
     if not owner or owner.role!='merchant' or owner.status!='active': raise HTTPException(404,'المتجر غير موجود')
-    rows=db.scalars(select(Product).where(Product.merchant_id==owner.id,Product.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
+    rows=db.scalars(select(Product).join(User, User.id==Product.merchant_id).where(Product.merchant_id==owner.id,Product.status=='active',User.status=='active').order_by(Product.created_at.desc(),Product.id.desc()).limit(limit).offset(offset)).all()
     items=products_out(rows,db)
     for item in items:
         item.pop('affiliate_rate',None); item.pop('platform_rate',None); item.pop('status',None)
