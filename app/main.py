@@ -227,6 +227,11 @@ class AnnouncementIn(BaseModel):
     priority: int = Field(default=0, ge=0, le=1000)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    is_sponsored: bool = False
+    advertiser_name: str = Field(default='', max_length=180)
+    price_egp: Decimal = Field(default=Decimal('0'), ge=0, max_digits=12, decimal_places=2)
+    payment_status: str = Field(default='not_required', max_length=20)
+    payment_reference: str = Field(default='', max_length=120)
 
 class AnnouncementUpdateIn(BaseModel):
     title: str | None = Field(default=None, min_length=3, max_length=180)
@@ -239,6 +244,11 @@ class AnnouncementUpdateIn(BaseModel):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     is_active: bool | None = None
+    is_sponsored: bool | None = None
+    advertiser_name: str | None = Field(default=None, max_length=180)
+    price_egp: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    payment_status: str | None = Field(default=None, max_length=20)
+    payment_reference: str | None = Field(default=None, max_length=120)
 
 class AnnouncementEventIn(BaseModel):
     event_type: str
@@ -1369,8 +1379,10 @@ def contract_action(contract_id:int,action:str,user:User=Depends(require_role('a
 def announcement_out(item, views=0, clicks=0):
     return {'id':item.id,'title':item.title,'body':item.body,'audience':item.audience,
         'target_url':item.target_url,'button_label':item.button_label,'placement':item.placement,
-        'priority':item.priority,'is_active':item.is_active,'views':views,'clicks':clicks,
-        'ctr':round((clicks/views*100),2) if views else 0,
+        'priority':item.priority,'is_active':item.is_active,'is_sponsored':item.is_sponsored,
+        'advertiser_name':item.advertiser_name,'price_egp':float(item.price_egp or 0),
+        'payment_status':item.payment_status,'payment_reference':item.payment_reference,
+        'views':views,'clicks':clicks,'ctr':round((clicks/views*100),2) if views else 0,
         'starts_at':item.starts_at.isoformat() if item.starts_at else None,
         'ends_at':item.ends_at.isoformat() if item.ends_at else None,
         'created_at':item.created_at.isoformat() if item.created_at else None}
@@ -1403,6 +1415,7 @@ def active_announcements(request:Request,db:Session=Depends(get_db)):
     rows=db.scalars(select(Announcement).where(
         Announcement.is_active.is_(True),
         Announcement.audience.in_(audience_values),
+        ((Announcement.is_sponsored.is_(False)) | (Announcement.payment_status == 'paid')),
         (Announcement.starts_at.is_(None) | (Announcement.starts_at <= now_utc)),
         (Announcement.ends_at.is_(None) | (Announcement.ends_at > now_utc))
     ).order_by(Announcement.priority.desc(),Announcement.created_at.desc(),Announcement.id.desc()).limit(30)).all()
@@ -1439,6 +1452,14 @@ def admin_announcements(user:User=Depends(require_role('admin')),db:Session=Depe
 def create_announcement(data:AnnouncementIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if data.audience not in ('all','visitor','customer','merchant','affiliate'):
         raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    if data.payment_status not in ('not_required','pending','paid'):
+        raise HTTPException(400,'حالة الدفع غير صحيحة')
+    if data.is_sponsored and (not data.advertiser_name.strip() or data.price_egp <= 0):
+        raise HTTPException(400,'الإعلان الممول يتطلب اسم المعلن وسعراً أكبر من صفر')
+    if data.is_sponsored and data.payment_status == 'not_required':
+        raise HTTPException(400,'حدد حالة سداد الإعلان الممول')
+    if not data.is_sponsored:
+        data.payment_status='not_required'; data.price_egp=Decimal('0'); data.payment_reference=''
     if data.placement not in ('top_banner','home_feed','product_feed'):
         raise HTTPException(400,'مكان ظهور الإعلان غير صحيح')
     target=data.target_url.strip()
@@ -1448,7 +1469,9 @@ def create_announcement(data:AnnouncementIn,user:User=Depends(require_role('admi
         raise HTTPException(400,'موعد انتهاء الإعلان يجب أن يكون بعد موعد بدايته')
     item=Announcement(title=data.title.strip(),body=data.body.strip(),audience=data.audience,
         target_url=target,button_label=data.button_label.strip(),placement=data.placement,priority=data.priority,
-        is_active=True,starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
+        is_active=True,is_sponsored=data.is_sponsored,advertiser_name=data.advertiser_name.strip(),
+        price_egp=data.price_egp,payment_status=data.payment_status,payment_reference=data.payment_reference.strip(),
+        starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
     db.add(item); db.commit(); db.refresh(item)
     return announcement_out(item)
 
@@ -1459,6 +1482,8 @@ def update_announcement(announcement_id:int,data:AnnouncementUpdateIn,user:User=
     changes=data.model_dump(exclude_unset=True)
     if 'audience' in changes and changes['audience'] not in ('all','visitor','customer','merchant','affiliate'):
         raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    if 'payment_status' in changes and changes['payment_status'] not in ('not_required','pending','paid'):
+        raise HTTPException(400,'حالة الدفع غير صحيحة')
     if 'placement' in changes and changes['placement'] not in ('top_banner','home_feed','product_feed'):
         raise HTTPException(400,'مكان ظهور الإعلان غير صحيح')
     if 'target_url' in changes:
@@ -1466,6 +1491,16 @@ def update_announcement(announcement_id:int,data:AnnouncementUpdateIn,user:User=
         if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
             raise HTTPException(400,'الرابط يجب أن يكون مسارًا داخليًا أو رابط HTTPS')
         changes['target_url']=target
+    sponsor=changes.get('is_sponsored',item.is_sponsored)
+    advertiser=changes.get('advertiser_name',item.advertiser_name) or ''
+    price=changes.get('price_egp',item.price_egp)
+    payment=changes.get('payment_status',item.payment_status)
+    if sponsor and (not advertiser.strip() or Decimal(str(price or 0)) <= 0):
+        raise HTTPException(400,'الإعلان الممول يتطلب اسم المعلن وسعراً أكبر من صفر')
+    if sponsor and payment == 'not_required':
+        raise HTTPException(400,'حدد حالة سداد الإعلان الممول')
+    if not sponsor:
+        changes.update({'payment_status':'not_required','price_egp':Decimal('0'),'payment_reference':''})
     start=changes.get('starts_at',item.starts_at)
     end=changes.get('ends_at',item.ends_at)
     if start and end and end<=start: raise HTTPException(400,'موعد انتهاء الإعلان يجب أن يكون بعد موعد بدايته')
