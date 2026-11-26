@@ -891,6 +891,8 @@ class ContractBrandAssetsIn(BaseModel):
     signature_data_url: str | None = None
     stamp_data_url: str | None = None
     is_active: bool = True
+    signature_enabled: bool = True
+    stamp_enabled: bool = True
     contract_types: list[str] = Field(default_factory=lambda: ['platform_merchant','platform_affiliate','merchant_affiliate'])
 
 def validate_brand_png(value: str | None, label: str):
@@ -1325,8 +1327,8 @@ def admin_negotiations(user:User=Depends(require_role('admin')),db:Session=Depen
 
 @app.get('/api/admin/contract-brand-assets')
 def admin_get_contract_brand_assets(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    row=db.execute(text("select signature_data_url,stamp_data_url,is_active,contract_types,version,updated_at,updated_by from wesla_contract_brand_assets where id=1")).mappings().first()
-    history=db.execute(text("select v.version,v.is_active,v.contract_types,v.created_at,u.name as changed_by from wesla_contract_brand_asset_versions v left join users u on u.id=v.changed_by order by v.version desc limit 20")).mappings().all()
+    row=db.execute(text("select signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,version,updated_at,updated_by from wesla_contract_brand_assets where id=1")).mappings().first()
+    history=db.execute(text("select v.version,v.is_active,v.signature_enabled,v.stamp_enabled,v.contract_types,v.created_at,u.name as changed_by from wesla_contract_brand_asset_versions v left join users u on u.id=v.changed_by order by v.version desc limit 20")).mappings().all()
     primary_id=db.execute(text("select value from site_settings where key='primary_admin_user_id'")).scalar() or '2'
     return {'is_primary_admin':str(user.id)==str(primary_id),'assets':dict(row) if row else None,'history':[dict(x) for x in history]}
 
@@ -1343,15 +1345,15 @@ def admin_update_contract_brand_assets(data:ContractBrandAssetsIn,user:User=Depe
     current=db.execute(text("select version from wesla_contract_brand_assets where id=1 for update")).scalar()
     version=int(current or 0)+1
     db.execute(text("""
-      insert into wesla_contract_brand_asset_versions(version,signature_data_url,stamp_data_url,is_active,contract_types,changed_by)
-      values (:version,:signature,:stamp,:active,:types,:actor)
-    """),{'version':version,'signature':signature,'stamp':stamp,'active':data.is_active,'types':data.contract_types,'actor':user.id})
+      insert into wesla_contract_brand_asset_versions(version,signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,changed_by)
+      values (:version,:signature,:stamp,:active,:signature_enabled,:stamp_enabled,:types,:actor)
+    """),{'version':version,'signature':signature,'stamp':stamp,'active':data.is_active,'signature_enabled':data.signature_enabled,'stamp_enabled':data.stamp_enabled,'types':data.contract_types,'actor':user.id})
     db.execute(text("""
-      insert into wesla_contract_brand_assets(id,signature_data_url,stamp_data_url,is_active,contract_types,version,updated_by,updated_at)
-      values (1,:signature,:stamp,:active,:types,:version,:actor,now())
+      insert into wesla_contract_brand_assets(id,signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,version,updated_by,updated_at)
+      values (1,:signature,:stamp,:active,:signature_enabled,:stamp_enabled,:types,:version,:actor,now())
       on conflict(id) do update set signature_data_url=excluded.signature_data_url,stamp_data_url=excluded.stamp_data_url,
-        is_active=excluded.is_active,contract_types=excluded.contract_types,version=excluded.version,updated_by=excluded.updated_by,updated_at=now()
-    """),{'signature':signature,'stamp':stamp,'active':data.is_active,'types':data.contract_types,'version':version,'actor':user.id})
+        is_active=excluded.is_active,signature_enabled=excluded.signature_enabled,stamp_enabled=excluded.stamp_enabled,contract_types=excluded.contract_types,version=excluded.version,updated_by=excluded.updated_by,updated_at=now()
+    """),{'signature':signature,'stamp':stamp,'active':data.is_active,'signature_enabled':data.signature_enabled,'stamp_enabled':data.stamp_enabled,'types':data.contract_types,'version':version,'actor':user.id})
     db.commit()
     return {'ok':True,'version':version,'message':'تم حفظ هوية توقيع وختم وصلة. سيُطبق التحديث على العقود الجديدة فقط.'}
 
@@ -1464,10 +1466,10 @@ def contract_action(contract_id:int,action:str,user:User=Depends(require_role('a
     if not c: raise HTTPException(404,'الاتفاقية غير موجودة')
     if action=='activate':
         if c.status!='draft': raise HTTPException(409,'لا يمكن إرسال هذه النسخة في حالتها الحالية')
-        assets=db.execute(text("select signature_data_url,stamp_data_url,is_active,contract_types,version from wesla_contract_brand_assets where id=1")).mappings().first()
+        assets=db.execute(text("select signature_data_url,stamp_data_url,is_active,signature_enabled,stamp_enabled,contract_types,version from wesla_contract_brand_assets where id=1")).mappings().first()
         if assets and assets['is_active'] and c.contract_type in (assets['contract_types'] or []):
-            c.brand_signature_snapshot=assets['signature_data_url']
-            c.brand_stamp_snapshot=assets['stamp_data_url']
+            c.brand_signature_snapshot=assets['signature_data_url'] if assets['signature_enabled'] else None
+            c.brand_stamp_snapshot=assets['stamp_data_url'] if assets['stamp_enabled'] else None
             c.brand_assets_version=assets['version']
         c.status='active'; contract_event(db,c,user,'sent_for_signature',{'brand_assets_version':c.brand_assets_version})
     elif action=='archive':
