@@ -63,6 +63,7 @@ class Order(Base):
     product_id: Mapped[int]=mapped_column(ForeignKey('products.id'))
     merchant_id: Mapped[int]=mapped_column(ForeignKey('users.id'))
     affiliate_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    customer_user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id',ondelete='SET NULL'), nullable=True, index=True)
     quantity: Mapped[int]=mapped_column(Integer)
     variant_id: Mapped[int|None]=mapped_column(ForeignKey('product_variants.id'), nullable=True)
     selected_color: Mapped[str|None]=mapped_column(String(80), nullable=True)
