@@ -114,10 +114,14 @@ def require_admin_stream_access(request: Request):
 async def stream_database_events(request: Request, admin_only: bool = False):
     queue = await event_hub.subscribe()
     async def event_generator():
-        last_auth_check = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        last_auth_check = started_at
+        # Vercel serverless functions have a hard execution limit. Close each
+        # SSE response cleanly after 25 seconds; EventSource reconnects itself.
         try:
             yield 'retry: 3000\n\n'
-            while True:
+            while loop.time() - started_at < 25:
                 if await request.is_disconnected():
                     break
                 try:
