@@ -74,6 +74,8 @@ class Order(Base):
     affiliate_commission: Mapped[float]=mapped_column(Numeric(12,2), default=0)
     platform_commission: Mapped[float]=mapped_column(Numeric(12,2), default=0)
     status: Mapped[str]=mapped_column(String(20), default='pending')
+    coupon_code: Mapped[str|None]=mapped_column(String(40), nullable=True)
+    discount_amount: Mapped[float]=mapped_column(Numeric(12,2), default=0)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 class Payout(Base):
     __tablename__='payouts'
@@ -263,7 +265,7 @@ class Announcement(Base):
     button_label: Mapped[str]=mapped_column(String(60), default='')
     placement: Mapped[str]=mapped_column(String(30), default='top_banner')
     priority: Mapped[int]=mapped_column(Integer, default=0)
-    is_active: Mapped[bool]=mapped_column(Boolean, default=True
+    is_active: Mapped[bool]=mapped_column(Boolean, default=True)
     starts_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     ends_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True)
@@ -278,3 +280,68 @@ class AnnouncementEvent(Base):
     event_type: Mapped[str]=mapped_column(String(12))
     visitor_key: Mapped[str]=mapped_column(String(64), index=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+
+
+class Favorite(Base):
+    __tablename__='favorites'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    user_id: Mapped[int]=mapped_column(ForeignKey('users.id',ondelete='CASCADE'),index=True)
+    product_id: Mapped[int]=mapped_column(ForeignKey('products.id',ondelete='CASCADE'),index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+    __table_args__=(UniqueConstraint('user_id','product_id'),)
+
+class Coupon(Base):
+    __tablename__='coupons'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    code: Mapped[str]=mapped_column(String(40),unique=True,index=True)
+    discount_type: Mapped[str]=mapped_column(String(12))
+    discount_value: Mapped[float]=mapped_column(Numeric(12,2))
+    min_order_total: Mapped[float]=mapped_column(Numeric(12,2),default=0)
+    max_discount: Mapped[float|None]=mapped_column(Numeric(12,2),nullable=True)
+    usage_limit: Mapped[int|None]=mapped_column(Integer,nullable=True)
+    used_count: Mapped[int]=mapped_column(Integer,default=0)
+    starts_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True),nullable=True)
+    ends_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True),nullable=True)
+    is_active: Mapped[bool]=mapped_column(Boolean,default=True)
+    created_by: Mapped[int|None]=mapped_column(ForeignKey('users.id',ondelete='SET NULL'),nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+
+class CouponRedemption(Base):
+    __tablename__='coupon_redemptions'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    coupon_id: Mapped[int]=mapped_column(ForeignKey('coupons.id'))
+    order_id: Mapped[int]=mapped_column(ForeignKey('orders.id'),unique=True)
+    user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id',ondelete='SET NULL'),nullable=True)
+    discount_amount: Mapped[float]=mapped_column(Numeric(12,2))
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+
+class SupportTicket(Base):
+    __tablename__='support_tickets'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    user_id: Mapped[int]=mapped_column(ForeignKey('users.id',ondelete='CASCADE'),index=True)
+    subject: Mapped[str]=mapped_column(String(180))
+    status: Mapped[str]=mapped_column(String(20),default='open')
+    priority: Mapped[str]=mapped_column(String(12),default='normal')
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+    updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+
+class SupportMessage(Base):
+    __tablename__='support_messages'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    ticket_id: Mapped[int]=mapped_column(ForeignKey('support_tickets.id',ondelete='CASCADE'),index=True)
+    sender_user_id: Mapped[int|None]=mapped_column(ForeignKey('users.id',ondelete='SET NULL'),nullable=True)
+    body: Mapped[str]=mapped_column(Text)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+    read_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True),nullable=True)
+
+class WalletTransaction(Base):
+    __tablename__='wallet_transactions'
+    id: Mapped[int]=mapped_column(primary_key=True)
+    user_id: Mapped[int]=mapped_column(ForeignKey('users.id',ondelete='CASCADE'),index=True)
+    amount: Mapped[float]=mapped_column(Numeric(12,2))
+    kind: Mapped[str]=mapped_column(String(24))
+    reference_type: Mapped[str]=mapped_column(String(24))
+    reference_id: Mapped[int]=mapped_column(Integer)
+    description: Mapped[str]=mapped_column(String(240),default='')
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+    __table_args__=(UniqueConstraint('user_id','kind','reference_type','reference_id'),)
