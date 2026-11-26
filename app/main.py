@@ -392,6 +392,7 @@ def register(data:RegisterIn,db:Session=Depends(get_db)):
     referrer=None
     referral_code=(data.referral_code or '').strip().upper()
     if referral_code:
+        if not wesla_feature_enabled(db, 'referrals', True): raise HTTPException(409,'برنامج دعوة الأصدقاء متوقف مؤقتًا')
         referrer=db.execute(text("select user_id from wesla_referral_codes where upper(code)=:code"),{'code':referral_code}).first()
         if not referrer: raise HTTPException(400,'كود الدعوة غير صحيح')
     u=User(name=data.name.strip(),email=email,password_hash=hash_password(data.password),role='customer')
@@ -1968,7 +1969,7 @@ def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(re
     db.execute(text("""
       insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
       values (:key,:enabled,cast(:audience as jsonb),cast(:config as jsonb),now())
-      on conflict(feature_key) do update set is_enabled=excluded.is_enabled,audience=excluded.audience,config=excluded.config,updated_at=now()
+      on conflict(feature_key) do update set is_enabled=excluded.is_enabled,audience=excluded.audience,config=wesla_feature_settings.config || excluded.config,updated_at=now()
     """),{'key':feature_key,'enabled':enabled,'audience':json.dumps(audience),'config':json.dumps(config)})
     db.commit()
     return {'ok':True,'feature_key':feature_key,'is_enabled':enabled}
