@@ -122,8 +122,9 @@ async def capture_admin_activity(request: Request, call_next):
             token = request.cookies.get('wesla_session')
             if token:
                 token_hash = hashlib.sha256(token.encode()).hexdigest()
-                session = db.scalar(select(AuthSession).where(AuthSession.token_hash == token_hash))
-                actor = db.get(User, session.user_id) if session else None
+                actor = db.scalar(select(User).join(AuthSession, AuthSession.user_id == User.id).where(
+                    AuthSession.token_hash == token_hash, AuthSession.expires_at > datetime.now(timezone.utc),
+                    User.role == 'admin', User.status == 'active'))
                 enabled = db.execute(text("select is_enabled from wesla_feature_settings where feature_key='admin_activity_log'")).scalar()
                 if actor and actor.role == 'admin' and enabled:
                     target_match = re.search(r'/([0-9]+)(?:/|$)', path)
