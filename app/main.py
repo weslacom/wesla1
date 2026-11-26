@@ -61,7 +61,7 @@ def portal_diagnostics(db:Session=Depends(get_db)):
     # Safe same-origin readiness check for the administration page.
     db.execute(text('select 1'))
     required = ['/api/admin/password-login', '/api/admin/overview', '/api/admin/contracts',
-                '/api/admin/contract-requests', '/api/admin/negotiations', '/api/admin/termination-requests', '/api/admin/accounts', '/api/admin/visitors', '/api/admin/pages', '/api/admin/referrals', '/api/public/merchants', '/api/public/pages']
+                '/api/admin/contract-requests', '/api/admin/negotiations', '/api/admin/termination-requests', '/api/admin/accounts', '/api/admin/visitors', '/api/admin/pages', '/api/admin/referrals', '/api/admin/rewards/offers', '/api/public/merchants', '/api/public/pages']
     paths = app.openapi().get('paths', {})
     routes = {path: path in paths for path in required}
     ready = all(routes.values())
@@ -1844,6 +1844,18 @@ def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(re
     db.commit()
     return {'ok':True,'feature_key':feature_key,'is_enabled':enabled}
 
+class RewardOfferIn(BaseModel):
+    title: str = Field(min_length=2, max_length=180)
+    description: str = Field(default='', max_length=3000)
+    points_cost: int = Field(gt=0, le=1000000)
+    discount_type: str
+    discount_value: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    min_order_total: Decimal = Field(default=Decimal('0'), ge=0, max_digits=12, decimal_places=2)
+    max_discount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    coupon_valid_days: int = Field(default=30, ge=1, le=365)
+    usage_limit: int = Field(default=1, ge=1, le=1000)
+    is_active: bool = True
+
 # Wesla operational features requested by the owner: public merchant directory,
 # referral/rewards administration, visitor analytics, internal pages and account actions.
 class PublicVisitIn(BaseModel):
@@ -2174,6 +2186,49 @@ def admin_account_action_history(account_id: int, user: User = Depends(require_r
       where target_user_id=:id order by created_at desc limit 100
     """), {'id':account_id}).mappings().all()
     return [dict(x) for x in rows]
+
+
+@app.get('/api/admin/rewards/offers')
+def admin_reward_offers(user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows=db.execute(text("select * from wesla_reward_offers order by created_at desc,id desc")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/rewards/offers')
+def admin_create_reward_offer(data: RewardOfferIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    if data.discount_type not in ('fixed','percent'):
+        raise HTTPException(400,'نوع الخصم يجب أن يكون مبلغاً ثابتاً أو نسبة مئوية')
+    if data.discount_type=='percent' and data.discount_value>100:
+        raise HTTPException(400,'نسبة الخصم لا يمكن أن تتجاوز 100%')
+    row=db.execute(text("""
+      insert into wesla_reward_offers(title,description,points_cost,discount_type,discount_value,min_order_total,max_discount,coupon_valid_days,usage_limit,is_active,created_by)
+      values (:title,:description,:points,:type,:value,:minimum,:maximum,:days,:limit,:active,:actor)
+      returning id
+    """), {'title':data.title.strip(),'description':data.description,'points':data.points_cost,'type':data.discount_type,'value':data.discount_value,'minimum':data.min_order_total,'maximum':data.max_discount,'days':data.coupon_valid_days,'limit':data.usage_limit,'active':data.is_active,'actor':user.id}).first()
+    db.commit()
+    return {'ok':True,'id':row.id}
+
+@app.patch('/api/admin/rewards/offers/{offer_id}')
+def admin_update_reward_offer(offer_id: int, data: RewardOfferIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    if data.discount_type not in ('fixed','percent') or (data.discount_type=='percent' and data.discount_value>100):
+        raise HTTPException(400,'بيانات الخصم غير صحيحة')
+    result=db.execute(text("""
+      update wesla_reward_offers set title=:title,description=:description,points_cost=:points,
+        discount_type=:type,discount_value=:value,min_order_total=:minimum,max_discount=:maximum,
+        coupon_valid_days=:days,usage_limit=:limit,is_active=:active,updated_at=now()
+      where id=:id returning id
+    """), {'title':data.title.strip(),'description':data.description,'points':data.points_cost,'type':data.discount_type,'value':data.discount_value,'minimum':data.min_order_total,'maximum':data.max_discount,'days':data.coupon_valid_days,'limit':data.usage_limit,'active':data.is_active,'id':offer_id}).first()
+    if not result:
+        raise HTTPException(404,'المكافأة غير موجودة')
+    db.commit()
+    return {'ok':True}
+
+@app.delete('/api/admin/rewards/offers/{offer_id}')
+def admin_disable_reward_offer(offer_id: int, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    result=db.execute(text("update wesla_reward_offers set is_active=false,updated_at=now() where id=:id returning id"), {'id':offer_id}).first()
+    if not result:
+        raise HTTPException(404,'المكافأة غير موجودة')
+    db.commit()
+    return {'ok':True}
 
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
 # and custom pages work without requiring a special /chat suffix.
