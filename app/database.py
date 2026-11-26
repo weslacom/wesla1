@@ -22,9 +22,12 @@ if not DATABASE_URL.startswith("sqlite"):
     # Vercel runs short-lived serverless instances; bound each local connection pool.
     on_vercel = os.getenv("VERCEL") == "1"
     engine_options.update({
-        "pool_size": max(1, int(os.getenv("DB_POOL_SIZE", "1" if on_vercel else "5"))),
-        "max_overflow": max(0, int(os.getenv("DB_MAX_OVERFLOW", "0" if on_vercel else "5"))),
-        "pool_timeout": max(5, int(os.getenv("DB_POOL_TIMEOUT", "15" if on_vercel else "20"))),
+        # Allow a small amount of parallelism because the admin portal loads
+        # several independent API panels at once. The Supabase session pooler
+        # remains the outer connection limiter.
+        "pool_size": max(1, int(os.getenv("DB_POOL_SIZE", "3" if on_vercel else "5"))),
+        "max_overflow": max(0, int(os.getenv("DB_MAX_OVERFLOW", "2" if on_vercel else "5"))),
+        "pool_timeout": max(5, int(os.getenv("DB_POOL_TIMEOUT", "10" if on_vercel else "20"))),
         "pool_recycle": max(300, int(os.getenv("DB_POOL_RECYCLE", "600" if on_vercel else "1800"))),
         "pool_use_lifo": True,
         "connect_args": {"connect_timeout": 10},
