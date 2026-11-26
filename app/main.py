@@ -1594,3 +1594,119 @@ def bootstrap_admin():
             db.commit()
     finally: db.close()
 bootstrap_admin()
+
+
+# Wesla advanced ecosystem: initial live endpoints backed by dedicated Supabase tables.
+@app.get('/api/advanced/rewards/me')
+def advanced_rewards_me(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    row=db.execute(text("select points_available,points_pending,lifetime_earned,tier from wesla_reward_accounts where user_id=:uid"),{'uid':user.id}).mappings().first()
+    ledger=db.execute(text("select delta,status,source_type,description,created_at from wesla_reward_ledger where user_id=:uid order by created_at desc limit 50"),{'uid':user.id}).mappings().all()
+    return {'account':dict(row) if row else {'points_available':0,'points_pending':0,'lifetime_earned':0,'tier':'basic'},'ledger':[dict(x) for x in ledger]}
+
+@app.get('/api/advanced/referrals/me')
+def advanced_referrals_me(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    row=db.execute(text("select code from wesla_referral_codes where user_id=:uid"),{'uid':user.id}).mappings().first()
+    if not row:
+        code='WS'+secrets.token_hex(4).upper()
+        db.execute(text("insert into wesla_referral_codes(user_id,code) values (:uid,:code) on conflict(user_id) do nothing"),{'uid':user.id,'code':code})
+        db.commit()
+        row=db.execute(text("select code from wesla_referral_codes where user_id=:uid"),{'uid':user.id}).mappings().first()
+    referrals=db.execute(text("select status,count(*)::int as total,coalesce(sum(reward_points),0)::bigint as points from wesla_referrals where referrer_user_id=:uid group by status"),{'uid':user.id}).mappings().all()
+    return {'code':row['code'],'referrals':[dict(x) for x in referrals]}
+
+@app.get('/api/advanced/trends')
+def advanced_trends(period:int=Query(default=7,ge=1,le=30),limit:int=Query(default=20,ge=1,le=50),db:Session=Depends(get_db)):
+    rows=db.execute(text("""
+      select p.id,p.title,p.price,p.stock,
+        count(*) filter(where e.event_type='view')::int as views,
+        count(*) filter(where e.event_type='favorite')::int as favorites,
+        count(*) filter(where e.event_type='order')::int as order_signals,
+        count(*)::int as trend_score
+      from wesla_trend_events e join products p on p.id=e.product_id
+      where p.status='active' and e.created_at >= now() - (:period * interval '1 day')
+      group by p.id,p.title,p.price,p.stock
+      order by trend_score desc,order_signals desc,views desc
+      limit :limit
+    """),{'period':period,'limit':limit}).mappings().all()
+    return {'period_days':period,'items':[dict(x) for x in rows]}
+
+@app.post('/api/advanced/trends/{product_id}/event')
+def advanced_trend_event(product_id:int,data:dict,request:Request,user:User|None=None,db:Session=Depends(get_db)):
+    kind=str(data.get('event_type','view')).strip().lower()
+    if kind not in ('view','favorite','order','share'): raise HTTPException(400,'نوع التفاعل غير مدعوم')
+    product=db.scalar(select(Product).where(Product.id==product_id,Product.status=='active'))
+    if not product: raise HTTPException(404,'المنتج غير متاح')
+    token=request.cookies.get('wesla_session','')
+    actor=None
+    if token:
+        try: actor=current_user(request,db)
+        except HTTPException: actor=None
+    ip=(request.headers.get('x-forwarded-for') or (request.client.host if request.client else 'unknown')).split(',')[0].strip()
+    visitor_hash=hashlib.sha256((ip+'|'+request.headers.get('user-agent','')[:250]).encode()).hexdigest()
+    recent=db.execute(text("select 1 from wesla_trend_events where product_id=:pid and visitor_hash=:vh and event_type=:kind and created_at>now()-interval '30 minutes' limit 1"),{'pid':product_id,'vh':visitor_hash,'kind':kind}).first()
+    if not recent:
+        db.execute(text("insert into wesla_trend_events(product_id,user_id,visitor_hash,event_type) values (:pid,:uid,:vh,:kind)"),{'pid':product_id,'uid':actor.id if actor else None,'vh':visitor_hash,'kind':kind})
+        db.commit()
+    return {'ok':True,'recorded':not bool(recent)}
+
+@app.get('/api/advanced/challenges')
+def advanced_challenges(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.execute(text("""
+      select c.id,c.title,c.description,c.starts_at,c.ends_at,c.reward_points,
+        coalesce(cp.status,'not_joined') as my_status
+      from wesla_challenges c left join wesla_challenge_participations cp
+        on cp.challenge_id=c.id and cp.user_id=:uid
+      where c.is_active=true and c.starts_at<=now() and c.ends_at>now()
+      order by c.ends_at asc limit 100
+    """),{'uid':user.id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/advanced/challenges/{challenge_id}/join')
+def advanced_join_challenge(challenge_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    challenge=db.execute(text("select id from wesla_challenges where id=:id and is_active=true and starts_at<=now() and ends_at>now()"),{'id':challenge_id}).first()
+    if not challenge: raise HTTPException(404,'التحدي غير متاح حالياً')
+    db.execute(text("insert into wesla_challenge_participations(challenge_id,user_id) values (:cid,:uid) on conflict(challenge_id,user_id) do nothing"),{'cid':challenge_id,'uid':user.id})
+    db.commit()
+    return {'ok':True,'message':'تم تسجيل اشتراكك في التحدي'}
+
+@app.get('/api/advanced/achievements/me')
+def advanced_achievements_me(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.execute(text("""
+      select a.code,a.title,a.description,ua.awarded_at
+      from wesla_user_achievements ua join wesla_achievements a on a.id=ua.achievement_id
+      where ua.user_id=:uid and a.is_active=true order by ua.awarded_at desc
+    """),{'uid':user.id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/advanced/academy')
+def advanced_academy(audience:str='all',db:Session=Depends(get_db)):
+    if audience not in ('all','customer','merchant','affiliate'): audience='all'
+    rows=db.execute(text("""
+      select id,title,content_type,audience,body,media_url,created_at
+      from wesla_academy_content where is_published=true and audience in ('all',:audience)
+      order by created_at desc limit 100
+    """),{'audience':audience}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/settings')
+def admin_advanced_settings(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("select feature_key,is_enabled,audience,config,updated_at from wesla_feature_settings order by feature_key")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.patch('/api/admin/advanced/settings/{feature_key}')
+def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    allowed={'wesla_ai','rewards','referrals','trends','recommendations','challenges','achievements','academy','seasonal_campaigns'}
+    if feature_key not in allowed: raise HTTPException(404,'الميزة غير معروفة')
+    enabled=data.get('is_enabled')
+    if not isinstance(enabled,bool): raise HTTPException(400,'حالة التفعيل غير صحيحة')
+    audience=data.get('audience',[])
+    if not isinstance(audience,list) or any(x not in ('all','customer','merchant','affiliate','visitor','admin') for x in audience): raise HTTPException(400,'الجمهور المحدد غير صحيح')
+    config=data.get('config',{})
+    if not isinstance(config,dict): raise HTTPException(400,'الإعدادات غير صحيحة')
+    db.execute(text("""
+      insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
+      values (:key,:enabled,cast(:audience as jsonb),cast(:config as jsonb),now())
+      on conflict(feature_key) do update set is_enabled=excluded.is_enabled,audience=excluded.audience,config=excluded.config,updated_at=now()
+    """),{'key':feature_key,'enabled':enabled,'audience':json.dumps(audience),'config':json.dumps(config)})
+    db.commit()
+    return {'ok':True,'feature_key':feature_key,'is_enabled':enabled}
