@@ -833,6 +833,20 @@ def payout(data:PayoutIn,user:User=Depends(require_role('affiliate','admin')),db
 def merchant_orders(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     rows=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.merchant_id==user.id).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
     return [{'order_number':o.order_number,'customer_name':o.customer_name,'customer_phone':o.customer_phone,'address':o.address,'product':title,'quantity':o.quantity,'color':o.selected_color,'size':o.selected_size,'total':o.total,'status':o.status,'affiliate_commission':float(o.affiliate_commission or 0) if o.status=='delivered' else None,'platform_commission':float(o.platform_commission or 0) if o.status=='delivered' else None,'merchant_net':round(float(o.total or 0)-float(o.affiliate_commission or 0)-float(o.platform_commission or 0),2) if o.status=='delivered' else None} for o,title in rows]
+@app.get('/api/merchant/orders/{order_number}/history')
+def merchant_order_history(order_number: str, user: User = Depends(require_role('merchant','admin')), db: Session = Depends(get_db)):
+    query = select(Order).where(Order.order_number == order_number)
+    if user.role != 'admin':
+        query = query.where(Order.merchant_id == user.id)
+    order = db.scalar(query)
+    if not order:
+        raise HTTPException(404, 'الطلب غير موجود')
+    if not wesla_feature_enabled(db, 'advanced_order_tracking', False):
+        return []
+    rows = db.execute(text("select status,actor_role,note,created_at from wesla_order_status_history where order_id=:oid order by created_at asc,id asc"), {'oid':order.id}).mappings().all()
+    labels = {'pending':'تم استلام الطلب','confirmed':'تم تأكيد الطلب','shipped':'الطلب في الطريق إليك','delivered':'تم تسليم الطلب','cancelled':'تم إلغاء الطلب','returned':'تم إرجاع الطلب'}
+    return [{'status':x['status'],'status_label':labels.get(x['status'],x['status']),'actor_role':x['actor_role'],'note':x['note'],'created_at':x['created_at']} for x in rows]
+
 @app.post('/api/merchant/orders/{order_number}/status')
 def update_order(order_number:str,status:str,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     if status not in ('confirmed','shipped','delivered','cancelled','returned'): raise HTTPException(400,'حالة الطلب غير صحيحة')
