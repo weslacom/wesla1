@@ -1855,7 +1855,7 @@ def public_internal_pages(request: Request, db: Session = Depends(get_db)):
                 role = actor.role
     rows = db.execute(text("""
       select slug,title,audience,updated_at from wesla_internal_pages
-      where is_published=true and audience in ('all',:role,'visitor')
+      where is_published=true and audience in ('all',:role)
       order by updated_at desc limit 100
     """), {'role': role}).mappings().all()
     return [dict(x) for x in rows]
@@ -1872,7 +1872,7 @@ def public_internal_page(slug: str, request: Request, db: Session = Depends(get_
                 role = actor.role
     row = db.execute(text("""
       select slug,title,body,audience,updated_at from wesla_internal_pages
-      where slug=:slug and is_published=true and audience in ('all',:role,'visitor')
+      where slug=:slug and is_published=true and audience in ('all',:role)
     """), {'slug': slug, 'role': role}).mappings().first()
     if not row:
         raise HTTPException(404, 'الصفحة غير متاحة')
