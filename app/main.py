@@ -1631,7 +1631,7 @@ def advanced_trends(period:int=Query(default=7,ge=1,le=30),limit:int=Query(defau
     return {'period_days':period,'items':[dict(x) for x in rows]}
 
 @app.post('/api/advanced/trends/{product_id}/event')
-def advanced_trend_event(product_id:int,data:dict,request:Request,user:User|None=None,db:Session=Depends(get_db)):
+def advanced_trend_event(product_id:int,data:dict,request:Request,db:Session=Depends(get_db)):
     kind=str(data.get('event_type','view')).strip().lower()
     if kind not in ('view','favorite','order','share'): raise HTTPException(400,'نوع التفاعل غير مدعوم')
     product=db.scalar(select(Product).where(Product.id==product_id,Product.status=='active'))
