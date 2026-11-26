@@ -1233,6 +1233,11 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
         brand_visual+='</div>'
     if c.contract_type=='merchant_affiliate':
         signature_cards.append('<section class="signature-card"><div class="party-role">منصة وصلة</div>'+brand_visual+'<div class="meta-row">هوية بصرية للمنصة ضمن نسخة العقد؛ لا تُعد وحدها شهادة تصديق أو توقيعًا إلكترونيًا معتمدًا.</div></section>')
+    elif c.contract_type in ('platform_merchant','platform_affiliate') and brand_visual:
+        for card_index, card_html in enumerate(signature_cards):
+            if 'party-role">الإدارة' in card_html:
+                signature_cards[card_index]=card_html.replace('</section>',brand_visual+'</section>')
+                break
     signatures=''.join(signature_cards)
     verification_text='تم التحقق من تطابق بصمة النسخة النهائية مع لقطة الإصدار وبصمات الموافقات المسجلة' if verified else 'هذه نسخة تاريخية لا يتوفر لها سجل لقطة نهائية مستقل يسمح بالتحقق الآلي الكامل من تطابق المحتوى'
     verification_class='verified' if verified else 'unverified'
