@@ -1012,7 +1012,7 @@ def contract_out(c,db):
       'penalty_type':c.penalty_type,'penalty_amount':c.penalty_amount,'penalty_percent':c.penalty_percent,
       'termination_terms':c.termination_terms,'legal_entity_name':c.legal_entity_name,
       'starts_at':c.starts_at.isoformat() if c.starts_at else None,'ends_at':c.ends_at.isoformat() if c.ends_at else None,
-      'approved_at':c.approved_at.isoformat() if c.approved_at else None,'platform_signer_name':c.platform_signer_name,'brand_signature_snapshot':c.brand_signature_snapshot,'brand_stamp_snapshot':c.brand_stamp_snapshot,'brand_assets_version':c.brand_assets_version,
+      'approved_at':c.approved_at.isoformat() if c.approved_at else None,'platform_signer_name':c.platform_signer_name,
       'final_hash':c.final_hash,'status':c.status,'created_at':c.created_at.isoformat(),
       'acceptances':[{'user_id':a.user_id,'full_name':a.full_name,'accepted_at':a.accepted_at.isoformat(),'document_hash':a.document_hash,'ip_address':a.ip_address,'user_agent':a.user_agent,'account_email':(db.get(User,a.user_id).email if db.get(User,a.user_id) else None),'role':(db.get(User,a.user_id).role if db.get(User,a.user_id) else None)} for a in accepts],
       'events':[{'event':e.event_type,'details':e.details if isinstance(e.details,dict) else (json.loads(e.details) if isinstance(e.details,str) and e.details else {}),'created_at':e.created_at.isoformat()} for e in events]}
