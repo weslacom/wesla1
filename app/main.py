@@ -1,4 +1,4 @@
-import os, secrets, hashlib, hmac, json, base64, binascii, asyncio
+import os, secrets, hashlib, hmac, json, base64, binascii, asyncio, re
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text
 from .database import Base, engine, get_db, SessionLocal
 from .event_hub import event_hub
-from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement
+from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement, AnnouncementEvent
 
 # Production schema is managed by Supabase migrations. Vercel instances are ephemeral.
 # Keep automatic schema creation for local development and isolated tests only.
@@ -207,11 +207,26 @@ class AnnouncementIn(BaseModel):
     audience: str = Field(default='all', max_length=20)
     target_url: str = Field(default='', max_length=500)
     button_label: str = Field(default='', max_length=60)
+    placement: str = Field(default='top_banner', max_length=30)
+    priority: int = Field(default=0, ge=0, le=1000)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
 
-class AnnouncementStatusIn(BaseModel):
-    is_active: bool
+class AnnouncementUpdateIn(BaseModel):
+    title: str | None = Field(default=None, min_length=3, max_length=180)
+    body: str | None = Field(default=None, min_length=1, max_length=5000)
+    audience: str | None = Field(default=None, max_length=20)
+    target_url: str | None = Field(default=None, max_length=500)
+    button_label: str | None = Field(default=None, max_length=60)
+    placement: str | None = Field(default=None, max_length=30)
+    priority: int | None = Field(default=None, ge=0, le=1000)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    is_active: bool | None = None
+
+class AnnouncementEventIn(BaseModel):
+    event_type: str
+    visitor_key: str = Field(min_length=24, max_length=64)
 
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
@@ -1211,12 +1226,24 @@ def contract_action(contract_id:int,action:str,user:User=Depends(require_role('a
     db.commit(); return {'message':'تم تحديث حالة الاتفاقية','status':c.status}
 
 
-def announcement_out(item):
+def announcement_out(item, views=0, clicks=0):
     return {'id':item.id,'title':item.title,'body':item.body,'audience':item.audience,
-        'target_url':item.target_url,'button_label':item.button_label,'is_active':item.is_active,
+        'target_url':item.target_url,'button_label':item.button_label,'placement':item.placement,
+        'priority':item.priority,'is_active':item.is_active,'views':views,'clicks':clicks,
+        'ctr':round((clicks/views*100),2) if views else 0,
         'starts_at':item.starts_at.isoformat() if item.starts_at else None,
         'ends_at':item.ends_at.isoformat() if item.ends_at else None,
         'created_at':item.created_at.isoformat() if item.created_at else None}
+
+def announcement_event_totals(db, ids):
+    if not ids: return {}
+    rows=db.execute(select(AnnouncementEvent.announcement_id,AnnouncementEvent.event_type,func.count(AnnouncementEvent.id))
+        .where(AnnouncementEvent.announcement_id.in_(ids))
+        .group_by(AnnouncementEvent.announcement_id,AnnouncementEvent.event_type)).all()
+    totals={i:{'view':0,'click':0} for i in ids}
+    for aid,kind,count in rows:
+        totals.setdefault(aid,{'view':0,'click':0})[kind]=int(count)
+    return totals
 
 @app.get('/api/announcements/active')
 def active_announcements(request:Request,db:Session=Depends(get_db)):
@@ -1232,42 +1259,83 @@ def active_announcements(request:Request,db:Session=Depends(get_db)):
                 if user and user.status=='active' and user.role in ('customer','merchant','affiliate'):
                     role=user.role
     now_utc=datetime.now(timezone.utc)
+    audience_values=['all',role] if role else ['all','visitor']
     rows=db.scalars(select(Announcement).where(
         Announcement.is_active.is_(True),
-        Announcement.audience.in_(['all',role] if role else ['all']),
+        Announcement.audience.in_(audience_values),
         (Announcement.starts_at.is_(None) | (Announcement.starts_at <= now_utc)),
         (Announcement.ends_at.is_(None) | (Announcement.ends_at > now_utc))
-    ).order_by(Announcement.created_at.desc(),Announcement.id.desc()).limit(20)).all()
+    ).order_by(Announcement.priority.desc(),Announcement.created_at.desc(),Announcement.id.desc()).limit(30)).all()
     return [announcement_out(x) for x in rows]
+
+@app.post('/api/announcements/{announcement_id}/event')
+def record_announcement_event(announcement_id:int,data:AnnouncementEventIn,db:Session=Depends(get_db)):
+    if data.event_type not in ('view','click'):
+        raise HTTPException(400,'نوع الحدث غير صحيح')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{24,64}',data.visitor_key):
+        raise HTTPException(400,'معرّف المتصفح غير صالح')
+    item=db.get(Announcement,announcement_id)
+    now_utc=datetime.now(timezone.utc)
+    if not item or not item.is_active or (item.starts_at and item.starts_at>now_utc) or (item.ends_at and item.ends_at<=now_utc):
+        raise HTTPException(404,'الإعلان غير متاح')
+    if data.event_type=='view':
+        recent=db.scalar(select(AnnouncementEvent.id).where(
+            AnnouncementEvent.announcement_id==announcement_id,
+            AnnouncementEvent.visitor_key==data.visitor_key,
+            AnnouncementEvent.event_type=='view',
+            AnnouncementEvent.created_at>=now_utc-timedelta(hours=24)).limit(1))
+        if recent: return {'ok':True,'recorded':False}
+    db.add(AnnouncementEvent(announcement_id=announcement_id,event_type=data.event_type,visitor_key=data.visitor_key))
+    db.commit()
+    return {'ok':True,'recorded':True}
 
 @app.get('/api/admin/announcements')
 def admin_announcements(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    rows=db.scalars(select(Announcement).order_by(Announcement.created_at.desc(),Announcement.id.desc()).limit(200)).all()
-    return [announcement_out(x) for x in rows]
+    rows=db.scalars(select(Announcement).order_by(Announcement.priority.desc(),Announcement.created_at.desc(),Announcement.id.desc()).limit(200)).all()
+    totals=announcement_event_totals(db,[x.id for x in rows])
+    return [announcement_out(x,totals.get(x.id,{}).get('view',0),totals.get(x.id,{}).get('click',0)) for x in rows]
 
 @app.post('/api/admin/announcements')
 def create_announcement(data:AnnouncementIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    if data.audience not in ('all','customer','merchant','affiliate'):
+    if data.audience not in ('all','visitor','customer','merchant','affiliate'):
         raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    if data.placement not in ('top_banner','home_feed','product_feed'):
+        raise HTTPException(400,'مكان ظهور الإعلان غير صحيح')
     target=data.target_url.strip()
     if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
         raise HTTPException(400,'الرابط يجب أن يكون مسارًا داخليًا أو رابط HTTPS')
     if data.starts_at and data.ends_at and data.ends_at <= data.starts_at:
         raise HTTPException(400,'موعد انتهاء الإعلان يجب أن يكون بعد موعد بدايته')
     item=Announcement(title=data.title.strip(),body=data.body.strip(),audience=data.audience,
-        target_url=target,button_label=data.button_label.strip(),is_active=True,
-        starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
+        target_url=target,button_label=data.button_label.strip(),placement=data.placement,priority=data.priority,
+        is_active=True,starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
     db.add(item); db.commit(); db.refresh(item)
     return announcement_out(item)
 
 @app.patch('/api/admin/announcements/{announcement_id}')
-def update_announcement(announcement_id:int,data:AnnouncementStatusIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+def update_announcement(announcement_id:int,data:AnnouncementUpdateIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     item=db.get(Announcement,announcement_id)
     if not item: raise HTTPException(404,'الإعلان غير موجود')
-    item.is_active=data.is_active
+    changes=data.model_dump(exclude_unset=True)
+    if 'audience' in changes and changes['audience'] not in ('all','visitor','customer','merchant','affiliate'):
+        raise HTTPException(400,'الفئة المستهدفة غير صحيحة')
+    if 'placement' in changes and changes['placement'] not in ('top_banner','home_feed','product_feed'):
+        raise HTTPException(400,'مكان ظهور الإعلان غير صحيح')
+    if 'target_url' in changes:
+        target=(changes['target_url'] or '').strip()
+        if target and not ((target.startswith('/') and not target.startswith('//')) or target.startswith('https://')):
+            raise HTTPException(400,'الرابط يجب أن يكون مسارًا داخليًا أو رابط HTTPS')
+        changes['target_url']=target
+    start=changes.get('starts_at',item.starts_at)
+    end=changes.get('ends_at',item.ends_at)
+    if start and end and end<=start: raise HTTPException(400,'موعد انتهاء الإعلان يجب أن يكون بعد موعد بدايته')
+    for key,value in changes.items():
+        if key in ('title','body','button_label') and isinstance(value,str): value=value.strip()
+        setattr(item,key,value)
     item.updated_at=datetime.now(timezone.utc)
     db.commit(); db.refresh(item)
-    return announcement_out(item)
+    totals=announcement_event_totals(db,[item.id]).get(item.id,{})
+    return announcement_out(item,totals.get('view',0),totals.get('click',0))
 
 @app.delete('/api/admin/announcements/{announcement_id}')
 def stop_announcement(announcement_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
