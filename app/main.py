@@ -73,7 +73,7 @@ def portal_diagnostics(db:Session=Depends(get_db)):
     # Safe same-origin readiness check for the administration page.
     db.execute(text('select 1'))
     required = ['/api/admin/password-login', '/api/admin/overview', '/api/admin/contracts',
-                '/api/admin/contract-requests', '/api/admin/negotiations', '/api/admin/termination-requests', '/api/admin/accounts', '/api/admin/visitors', '/api/admin/pages', '/api/admin/referrals', '/api/public/merchants', '/api/public/pages']
+                '/api/admin/contract-requests', '/api/admin/negotiations', '/api/admin/termination-requests', '/api/admin/accounts', '/api/admin/visitors', '/api/admin/pages', '/api/admin/referrals', '/api/admin/rewards/offers', '/api/advanced/rewards/offers', '/api/public/merchants', '/api/public/pages']
     paths = app.openapi().get('paths', {})
     routes = {path: path in paths for path in required}
     ready = all(routes.values())
