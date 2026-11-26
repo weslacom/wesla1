@@ -17,6 +17,12 @@ def test_health_and_core_workflow(monkeypatch, tmp_path):
     setup_db=SessionLocal()
     try:
         setup_db.execute(text("""
+            create table if not exists wesla_feature_settings (
+                feature_key varchar(40) primary key, is_enabled boolean not null default false,
+                audience text not null default '[]', config text not null default '{}', updated_at datetime
+            )
+        """))
+        setup_db.execute(text("""
             create table if not exists wesla_contract_brand_assets (
                 id integer primary key, signature_data_url text, stamp_data_url text,
                 is_active boolean not null default true, signature_enabled boolean not null default true,
