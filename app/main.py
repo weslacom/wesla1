@@ -1612,12 +1612,14 @@ bootstrap_admin()
 # Wesla advanced ecosystem: initial live endpoints backed by dedicated Supabase tables.
 @app.get('/api/advanced/rewards/me')
 def advanced_rewards_me(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db, 'rewards', True): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
     row=db.execute(text("select points_available,points_pending,lifetime_earned,tier from wesla_reward_accounts where user_id=:uid"),{'uid':user.id}).mappings().first()
     ledger=db.execute(text("select delta,status,source_type,description,created_at from wesla_reward_ledger where user_id=:uid order by created_at desc limit 50"),{'uid':user.id}).mappings().all()
     return {'account':dict(row) if row else {'points_available':0,'points_pending':0,'lifetime_earned':0,'tier':'basic'},'ledger':[dict(x) for x in ledger]}
 
 @app.get('/api/advanced/referrals/me')
 def advanced_referrals_me(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db, 'referrals', True): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
     row=db.execute(text("select code from wesla_referral_codes where user_id=:uid"),{'uid':user.id}).mappings().first()
     if not row:
         code='WS'+secrets.token_hex(4).upper()
@@ -1732,6 +1734,29 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
     db.commit()
     return {'ok':True,'ledger_id':ledger.id,'user_id':target_id,'delta':delta}
 
+FEATURE_READY = {
+    'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
+    'achievements': True, 'academy': True,
+    'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
+    'fraud_detection': False, 'admin_activity_log': False, 'smart_marketer_matching': False,
+    'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
+    'advanced_order_tracking': False, 'premium_subscriptions': False, 'ads_center': False,
+    'marketing_library': False, 'wallet_ledger': False, 'disputes_center': False,
+    'bulk_product_import': False, 'price_drop_alerts': False, 'bundles_deals': False
+}
+FEATURE_KEYS = set(FEATURE_READY)
+
+def wesla_feature_enabled(db: Session, feature_key: str, default: bool = True) -> bool:
+    value = db.execute(text("select is_enabled from wesla_feature_settings where feature_key=:key"),
+                       {'key': feature_key}).scalar()
+    return default if value is None else bool(value)
+
+@app.get('/api/advanced/features')
+def advanced_feature_status(db: Session = Depends(get_db)):
+    rows = db.execute(text("select feature_key,is_enabled from wesla_feature_settings")).mappings().all()
+    stored = {r['feature_key']: bool(r['is_enabled']) for r in rows}
+    return {key: bool(FEATURE_READY[key] and stored.get(key, False)) for key in FEATURE_KEYS}
+
 @app.get('/api/admin/advanced/settings')
 def admin_advanced_settings(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(text("select feature_key,is_enabled,audience,config,updated_at from wesla_feature_settings order by feature_key")).mappings().all()
@@ -1739,10 +1764,11 @@ def admin_advanced_settings(user:User=Depends(require_role('admin')),db:Session=
 
 @app.patch('/api/admin/advanced/settings/{feature_key}')
 def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    allowed={'wesla_ai','rewards','referrals','trends','recommendations','challenges','achievements','academy','seasonal_campaigns'}
+    allowed=FEATURE_KEYS
     if feature_key not in allowed: raise HTTPException(404,'الميزة غير معروفة')
     enabled=data.get('is_enabled')
     if not isinstance(enabled,bool): raise HTTPException(400,'حالة التفعيل غير صحيحة')
+    if enabled and not FEATURE_READY.get(feature_key, False): raise HTTPException(409,'هذا النظام ما زال قيد الربط والاختبار، ولا يمكن تفعيله قبل اكتماله')
     audience=data.get('audience',[])
     if not isinstance(audience,list) or any(x not in ('all','customer','merchant','affiliate','visitor','admin') for x in audience): raise HTTPException(400,'الجمهور المحدد غير صحيح')
     config=data.get('config',{})
