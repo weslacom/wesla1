@@ -2035,7 +2035,7 @@ def admin_accounts(role: str = Query(default='all'), status: str = Query(default
         (select count(*)::int from products p where p.merchant_id=u.id and p.status='deleted') as deleted_product_count,
         (select count(*)::int from orders o where o.merchant_id=u.id) as merchant_orders,
         (select count(*)::int from orders o where o.affiliate_id=u.id) as affiliate_orders,
-        (select count(*)::int from orders o where o.customer_phone=u.contact_phone) as customer_orders
+        (select count(*)::int from orders o where o.customer_user_id=u.id) as customer_orders
       from users u {where} order by u.created_at desc,u.id desc limit :limit
     """), params).mappings().all()
     return [dict(x) for x in rows]
