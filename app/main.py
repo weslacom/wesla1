@@ -19,6 +19,18 @@ if os.getenv('VERCEL') != '1':
     Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Wesla Affiliate Platform', version='1.0.0')
 
+# Normalize invisible bidirectional control characters accidentally appended
+# when Arabic/RTL links are copied from chat or messaging apps.
+_BIDI_URL_CONTROLS = {'\u200e', '\u200f', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069', '\ufeff'}
+
+@app.middleware('http')
+async def normalize_rtl_only_url_suffix(request: Request, call_next):
+    raw_path = request.scope.get('path', '')
+    normalized = ''.join(ch for ch in raw_path if ch not in _BIDI_URL_CONTROLS)
+    if normalized == '/' and raw_path != '/':
+        return RedirectResponse(url='/', status_code=307, headers={'Cache-Control': 'no-store'})
+    return await call_next(request)
+
 @app.on_event('startup')
 def cleanup_temporary_data_every_15_days():
     # There is no Redis/in-memory cache in this application. Clean only expired
