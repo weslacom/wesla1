@@ -233,7 +233,7 @@ class ForgotPasswordIn(BaseModel):
 
 class ResetPasswordIn(BaseModel):
     email: str = Field(min_length=5,max_length=190)
-    code: str = Field(min_length=6,max_length=6)
+    code: str = Field(min_length=32,max_length=64)
     new_password: str = Field(min_length=10,max_length=128)
 
 class FavoriteIn(BaseModel):
@@ -365,7 +365,7 @@ def forgot_password(data:ForgotPasswordIn,db:Session=Depends(get_db)):
     email=data.email.strip().lower()
     user=db.scalar(select(User).where(User.email==email,User.status=='active'))
     if not user: return generic
-    code=f'{secrets.randbelow(900000)+100000:06d}'
+    code=secrets.token_urlsafe(24)
     token_hash=hashlib.sha256(code.encode()).hexdigest()
     now_utc=datetime.now(timezone.utc)
     try:
