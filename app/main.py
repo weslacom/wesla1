@@ -1888,8 +1888,8 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
     return {'ok':True,'ledger_id':ledger.id,'user_id':target_id,'delta':delta}
 
 FEATURE_READY = {
-    'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
-    'achievements': True, 'academy': True,
+    'referrals': True, 'rewards': True, 'trends': False, 'challenges': False,
+    'achievements': False, 'academy': False,
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
     'fraud_detection': False, 'admin_activity_log': False, 'smart_marketer_matching': False,
     'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
@@ -2245,7 +2245,7 @@ def admin_update_referral_rewards_config(data: ReferralRewardConfigIn, user: Use
     db.execute(text("""
       insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
       values ('rewards',true,'["all"]'::jsonb,jsonb_build_object('purchase_points_per_100_egp'::text,CAST(:points AS integer)),now())
-      on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,is_enabled=true,updated_at=now()
+      on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,updated_at=now()
     """), {'points':data.purchase_points_per_100_egp})
     db.commit()
     return {'ok':True,'referral_reward_points':data.referral_reward_points,'purchase_points_per_100_egp':data.purchase_points_per_100_egp}
