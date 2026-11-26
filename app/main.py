@@ -756,6 +756,9 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     # Keep the product/order history in the database; it can be republished by restocking.
     if p.stock<=0: p.status='sold_out'
     db.add(order)
+    db.flush()
+    if wesla_feature_enabled(db, 'advanced_order_tracking', False):
+        db.execute(text("insert into wesla_order_status_history(order_id,status,actor_role,note) values (:oid,:status,'system','تم استلام الطلب')"), {'oid':order.id,'status':order.status})
     if coupon:
         db.flush(); coupon.used_count+=1
         db.add(CouponRedemption(coupon_id=coupon.id,order_id=order.id,user_id=None,discount_amount=discount))
@@ -770,7 +773,11 @@ def track_order(data:OrderTrackIn,db:Session=Depends(get_db)):
     if not row: raise HTTPException(404,'بيانات الطلب غير صحيحة. راجع رقم الطلب ورقم الهاتف.')
     order,title=row
     labels={'pending':'تم استلام الطلب','confirmed':'تم تأكيد الطلب','shipped':'الطلب في الطريق إليك','delivered':'تم تسليم الطلب','cancelled':'تم إلغاء الطلب','returned':'تم إرجاع الطلب'}
-    return {'order_number':order.order_number,'product':title,'quantity':order.quantity,'total':float(order.total),'status':order.status,'status_label':labels.get(order.status,order.status),'created_at':order.created_at.isoformat()}
+    timeline=[]
+    if wesla_feature_enabled(db, 'advanced_order_tracking', False):
+        events=db.execute(text("select status,actor_role,note,created_at from wesla_order_status_history where order_id=:oid order by created_at asc,id asc"), {'oid':order.id}).mappings().all()
+        timeline=[{'status':x['status'],'status_label':labels.get(x['status'],x['status']),'actor_role':x['actor_role'],'note':x['note'],'created_at':x['created_at']} for x in events]
+    return {'order_number':order.order_number,'product':title,'quantity':order.quantity,'total':float(order.total),'status':order.status,'status_label':labels.get(order.status,order.status),'created_at':order.created_at.isoformat(),'timeline':timeline}
 
 @app.get('/api/affiliate/links')
 def affiliate_links(user:User=Depends(require_role('affiliate','admin')),limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),db:Session=Depends(get_db)):
@@ -805,6 +812,8 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
     if not o: raise HTTPException(404,'الطلب غير موجود')
     if o.status in ('cancelled','returned','delivered'): raise HTTPException(409,'لا يمكن تغيير حالة هذا الطلب')
     o.status=status
+    if wesla_feature_enabled(db, 'advanced_order_tracking', False):
+        db.execute(text("insert into wesla_order_status_history(order_id,status,changed_by_user_id,actor_role,note) values (:oid,:status,:actor,:role,'تحديث حالة الطلب')"), {'oid':o.id,'status':status,'actor':user.id,'role':user.role})
     if status in ('cancelled','returned'):
         p=db.get(Product,o.product_id); p.stock+=o.quantity
         if o.variant_id:
@@ -1770,7 +1779,7 @@ FEATURE_READY = {
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
     'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
     'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
-    'advanced_order_tracking': False, 'premium_subscriptions': False, 'ads_center': False,
+    'advanced_order_tracking': True, 'premium_subscriptions': False, 'ads_center': False,
     'marketing_library': False, 'wallet_ledger': False, 'disputes_center': False,
     'bulk_product_import': False, 'price_drop_alerts': False, 'bundles_deals': False
 }
