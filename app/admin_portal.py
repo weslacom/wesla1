@@ -13,7 +13,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 DEFAULT_WESLA_API_BASE = "https://wesla-web-production.up.railway.app"
 DEFAULT_ADMIN_PORTAL_URL = "https://wesla-admin-production.up.railway.app"
-ADMIN_REQUIRED_ROUTES = ["/api/admin/password-login","/api/admin/overview","/api/admin/contracts","/api/admin/contract-requests","/api/admin/negotiations","/api/admin/termination-requests","/api/admin/accounts","/api/admin/visitors","/api/admin/pages","/api/admin/referrals","/api/public/merchants","/api/public/pages"]
+ADMIN_REQUIRED_ROUTES = ["/api/admin/password-login","/api/admin/overview","/api/admin/contracts","/api/admin/contract-requests","/api/admin/negotiations","/api/admin/termination-requests","/api/admin/accounts","/api/admin/visitors","/api/admin/pages","/api/admin/referrals","/api/admin/rewards/offers","/api/advanced/rewards/offers","/api/public/merchants","/api/public/pages"]
 
 
 def upstream_base(request: Request | None = None) -> str:
