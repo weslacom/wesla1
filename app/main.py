@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text
 from .database import Base, engine, get_db, SessionLocal
 from .event_hub import event_hub
-from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement, AnnouncementEvent
+from .models import User, Application, Product, Link, Order, Payout, AuthSession, Contract, ContractAcceptance, ProductVariant, ProductSizeGuide, ProductImage, ContractEvent, ContractTerminationRequest, CommissionChangeRequest, AffiliateProductExclusion, ProductAuditEvent, ContractRequest, ContractNegotiation, Notification, Announcement, AnnouncementEvent, Favorite, Coupon, CouponRedemption, SupportTicket, SupportMessage, WalletTransaction
 
 # Production schema is managed by Supabase migrations. Vercel instances are ephemeral.
 # Keep automatic schema creation for local development and isolated tests only.
@@ -228,6 +228,36 @@ class AnnouncementEventIn(BaseModel):
     event_type: str
     visitor_key: str = Field(min_length=24, max_length=64)
 
+class FavoriteIn(BaseModel):
+    product_id: int
+
+class SupportTicketIn(BaseModel):
+    subject: str = Field(min_length=4,max_length=180)
+    message: str = Field(min_length=10,max_length=5000)
+
+class SupportMessageIn(BaseModel):
+    body: str = Field(min_length=2,max_length=5000)
+
+class SupportTicketUpdateIn(BaseModel):
+    status: str | None = None
+    priority: str | None = None
+
+class CouponIn(BaseModel):
+    code: str = Field(min_length=3,max_length=40)
+    discount_type: str
+    discount_value: Decimal = Field(gt=0)
+    min_order_total: Decimal = Field(default=Decimal('0'),ge=0)
+    max_discount: Decimal | None = Field(default=None,gt=0)
+    usage_limit: int | None = Field(default=None,ge=1)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+class CouponUpdateIn(BaseModel):
+    is_active: bool | None = None
+    usage_limit: int | None = Field(default=None,ge=1)
+    ends_at: datetime | None = None
+
+
 class RegisterIn(BaseModel): name:str=Field(min_length=2,max_length=120); email:str; password:str=Field(min_length=8,max_length=128)
 class LoginIn(BaseModel): email:str; password:str
 class AdminPasswordLogin(BaseModel): password:str=Field(min_length=10,max_length=128)
@@ -248,7 +278,7 @@ class ProductIn(BaseModel):
     size_guide:dict={}; images:list[str]=Field(default_factory=list,max_length=4)
 class OrderIn(BaseModel):
     product_id:int; quantity:int=Field(ge=1,le=20); customer_name:str; customer_phone:str; address:str
-    referral_code:str|None=None; variant_id:int|None=None
+    referral_code:str|None=None; variant_id:int|None=None; coupon_code:str|None=Field(default=None,max_length=40)
 class OrderTrackIn(BaseModel):
     order_number:str=Field(min_length=6,max_length=32)
     customer_phone:str=Field(min_length=5,max_length=40)
@@ -600,19 +630,38 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     code=data.referral_code or request.cookies.get('wesla_ref'); link=db.scalar(select(Link).where(Link.code==code)) if code else None
     affiliate_id=link.affiliate_id if link and link.product_id==p.id else None
     chosen_price=variant.price_override if variant and variant.price_override is not None else p.price
-    total=(Decimal(chosen_price)*data.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP); ac=(total*Decimal(p.affiliate_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if affiliate_id else Decimal('0.00'); pc=(total*Decimal(p.platform_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
+    subtotal=(Decimal(chosen_price)*data.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    coupon=None; discount=Decimal('0.00')
+    if data.coupon_code and data.coupon_code.strip():
+        coupon=db.scalar(select(Coupon).where(Coupon.code==data.coupon_code.strip().upper()).with_for_update())
+        now_utc=datetime.now(timezone.utc)
+        if not coupon or not coupon.is_active or (coupon.starts_at and coupon.starts_at>now_utc) or (coupon.ends_at and coupon.ends_at<=now_utc):
+            raise HTTPException(400,'كود الخصم غير صالح أو غير نشط')
+        if coupon.usage_limit is not None and coupon.used_count>=coupon.usage_limit:
+            raise HTTPException(400,'انتهى عدد مرات استخدام كود الخصم')
+        if subtotal<Decimal(coupon.min_order_total):
+            raise HTTPException(400,f'الحد الأدنى للطلب لاستخدام الكود هو {coupon.min_order_total} جنيه')
+        discount=(subtotal*Decimal(coupon.discount_value)/Decimal(100)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP) if coupon.discount_type=='percent' else Decimal(coupon.discount_value)
+        if coupon.max_discount is not None: discount=min(discount,Decimal(coupon.max_discount))
+        discount=min(discount,subtotal)
+    total=(subtotal-discount).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+    ac=(total*Decimal(p.affiliate_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if affiliate_id else Decimal('0.00')
+    pc=(total*Decimal(p.platform_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=data.customer_name,customer_phone=data.customer_phone,address=data.address,product_id=p.id,merchant_id=p.merchant_id,affiliate_id=affiliate_id,quantity=data.quantity,variant_id=variant.id if variant else None,selected_color=variant.color if variant else None,selected_size=variant.size_label if variant else None,unit_price=chosen_price,total=total,coupon_code=coupon.code if coupon else None,discount_amount=discount,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,affiliate_commission=ac,platform_commission=pc)
     if variant: variant.stock-=data.quantity
     p.stock-=data.quantity
     # Hide the product from all public catalogues as soon as its total stock reaches zero.
     # Keep the product/order history in the database; it can be republished by restocking.
     if p.stock<=0: p.status='sold_out'
     db.add(order)
+    if coupon:
+        db.flush(); coupon.used_count+=1
+        db.add(CouponRedemption(coupon_id=coupon.id,order_id=order.id,user_id=None,discount_amount=discount))
     notify_user(db,p.merchant_id,'طلب جديد على منتجك',f'رقم الطلب {order.order_number} — إجمالي {total} جنيه','/dashboard')
     if affiliate_id:
         notify_user(db,affiliate_id,'طلب جديد من رابطك التسويقي',f'رقم الطلب {order.order_number}. ستظهر عمولتك بعد تأكيد التسليم.','/dashboard')
     db.commit(); db.refresh(order)
-    return {'order_number':order.order_number,'status':order.status,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
+    return {'order_number':order.order_number,'status':order.status,'subtotal':subtotal,'discount':discount,'coupon_code':coupon.code if coupon else None,'total':total,'message':'تم تسجيل الطلب. سيتواصل معك التاجر لتأكيده.'}
 @app.post('/api/orders/track')
 def track_order(data:OrderTrackIn,db:Session=Depends(get_db)):
     row=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.order_number==data.order_number.strip().upper(),Order.customer_phone==data.customer_phone.strip())).first()
@@ -640,7 +689,7 @@ def payout(data:PayoutIn,user:User=Depends(require_role('affiliate','admin')),db
     paid=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.affiliate_id==user.id,Payout.status.in_(['approved','paid']))) or 0
     pending=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.affiliate_id==user.id,Payout.status=='pending')) or 0
     if Decimal(str(data.amount))>Decimal(str(earned))-Decimal(str(paid))-Decimal(str(pending)): raise HTTPException(400,'المبلغ يتجاوز رصيدك القابل للسحب')
-    p=Payout(affiliate_id=user.id,amount=Decimal(str(data.amount)),method=data.method,destination=data.destination); db.add(p); db.commit(); return {'message':'تم إرسال طلب السحب للإدارة'}
+    p=Payout(affiliate_id=user.id,amount=Decimal(str(data.amount)),method=data.method,destination=data.destination); db.add(p); db.flush(); db.add(WalletTransaction(user_id=user.id,amount=-Decimal(str(data.amount)),kind='payout_reserve',reference_type='payout',reference_id=p.id,description='حجز مبلغ طلب السحب')); db.commit(); return {'message':'تم إرسال طلب السحب للإدارة'}
 @app.get('/api/merchant/orders')
 def merchant_orders(limit:int=Query(default=100,ge=1,le=200),offset:int=Query(default=0,ge=0),user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
     rows=db.execute(select(Order,Product.title).join(Product,Product.id==Order.product_id).where(Order.merchant_id==user.id).order_by(Order.created_at.desc()).limit(limit).offset(offset)).all()
@@ -666,6 +715,8 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
         notify_user(db,o.merchant_id,'تم تسليم الطلب',f'الطلب {o.order_number} تم تسليمه بنجاح. صافي قيمة البيع {round(float(o.total)-float(o.affiliate_commission or 0)-float(o.platform_commission or 0),2)} جنيه.')
         if o.affiliate_id:
             notify_user(db,o.affiliate_id,'عمولتك أصبحت مستحقة',f'تم تسليم الطلب {o.order_number}. عمولتك {o.affiliate_commission} جنيه.')
+            if Decimal(str(o.affiliate_commission or 0))>0:
+                db.add(WalletTransaction(user_id=o.affiliate_id,amount=Decimal(str(o.affiliate_commission)),kind='commission',reference_type='order',reference_id=o.id,description=f'عمولة الطلب {o.order_number}'))
         for admin_user in db.scalars(select(User).where(User.role=='admin',User.status=='active')).all():
             notify_user(db,admin_user.id,'عمولة منصة جديدة',f'اكتمل بيع الطلب {o.order_number}. عمولة وصلة {o.platform_commission} جنيه'+(f'، وعمولة المسوق {o.affiliate_commission} جنيه.' if o.affiliate_id else '.'),'/control')
     db.commit(); return {'message':'تم تحديث حالة الطلب. تم تحديث العمولات والإشعارات فورًا.'}
@@ -702,8 +753,13 @@ def admin_payouts(limit:int=Query(default=200,ge=1,le=500),offset:int=Query(defa
 def decide_payout(payout_id:int,decision:str,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     if decision not in ('approve','reject','paid'): raise HTTPException(400,'القرار غير صحيح')
     p=db.get(Payout,payout_id)
-    if not p or p.status!='pending': raise HTTPException(404,'طلب السحب غير موجود')
-    p.status={'approve':'approved','reject':'rejected','paid':'paid'}[decision]; db.commit(); return {'message':'تم تحديث طلب السحب'}
+    if not p or p.status not in ('pending','approved'): raise HTTPException(404,'طلب السحب غير موجود أو تمت مراجعته')
+    if decision=='approve' and p.status!='pending': raise HTTPException(409,'تم اعتماد طلب السحب بالفعل')
+    if decision=='reject' and p.status not in ('pending','approved'): raise HTTPException(409,'لا يمكن رفض هذا الطلب الآن')
+    p.status={'approve':'approved','reject':'rejected','paid':'paid'}[decision]
+    if decision=='reject':
+        db.add(WalletTransaction(user_id=p.affiliate_id,amount=Decimal(str(p.amount)),kind='payout_refund',reference_type='payout',reference_id=p.id,description='إعادة مبلغ طلب السحب المرفوض'))
+    db.commit(); return {'message':'تم تحديث طلب السحب'}
 
 
 # Electronic agreements. Visual platform marks are not a government certificate or accredited e-signature.
@@ -1345,6 +1401,127 @@ def stop_announcement(announcement_id:int,user:User=Depends(require_role('admin'
     item.updated_at=datetime.now(timezone.utc)
     db.commit()
     return {'message':'تم إيقاف الإعلان','id':item.id,'is_active':False}
+
+
+# Favorites, coupons, customer support and affiliate wallet ledger.
+def support_ticket_out(ticket,db,include_messages=False):
+    owner=db.get(User,ticket.user_id)
+    result={'id':ticket.id,'subject':ticket.subject,'status':ticket.status,'priority':ticket.priority,
+            'created_at':ticket.created_at.isoformat(),'updated_at':ticket.updated_at.isoformat(),
+            'user_name':owner.name if owner else '—','user_email':owner.email if owner else ''}
+    if include_messages:
+        rows=db.scalars(select(SupportMessage).where(SupportMessage.ticket_id==ticket.id).order_by(SupportMessage.created_at.asc()).limit(300)).all()
+        result['messages']=[{'id':x.id,'sender_user_id':x.sender_user_id,'sender_name':(db.get(User,x.sender_user_id).name if x.sender_user_id and db.get(User,x.sender_user_id) else 'إدارة وصلة'),'body':x.body,'created_at':x.created_at.isoformat()} for x in rows]
+    return result
+
+@app.get('/api/favorites')
+def my_favorites(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Product).join(Favorite,Favorite.product_id==Product.id).where(Favorite.user_id==user.id,Product.status=='active').order_by(Favorite.created_at.desc()).limit(200)).all()
+    return products_out(rows,db)
+
+@app.post('/api/favorites/{product_id}')
+def add_favorite(product_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    product=db.scalar(select(Product).where(Product.id==product_id,Product.status=='active'))
+    if not product: raise HTTPException(404,'المنتج غير متاح')
+    exists=db.scalar(select(Favorite.id).where(Favorite.user_id==user.id,Favorite.product_id==product_id))
+    if not exists:
+        db.add(Favorite(user_id=user.id,product_id=product_id)); db.commit()
+    return {'ok':True,'saved':True}
+
+@app.delete('/api/favorites/{product_id}')
+def remove_favorite(product_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    row=db.scalar(select(Favorite).where(Favorite.user_id==user.id,Favorite.product_id==product_id))
+    if row: db.delete(row); db.commit()
+    return {'ok':True,'saved':False}
+
+@app.post('/api/support/tickets')
+def create_support_ticket(data:SupportTicketIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    ticket=SupportTicket(user_id=user.id,subject=data.subject.strip(),status='open',priority='normal')
+    db.add(ticket); db.flush()
+    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,body=data.message.strip()))
+    for admin_user in db.scalars(select(User).where(User.role=='admin',User.status=='active')).all():
+        notify_user(db,admin_user.id,'تذكرة دعم جديدة',f'{user.name}: {ticket.subject}','/control')
+    db.commit(); db.refresh(ticket)
+    return support_ticket_out(ticket,db,True)
+
+@app.get('/api/support/tickets/my')
+def my_support_tickets(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(SupportTicket).where(SupportTicket.user_id==user.id).order_by(SupportTicket.updated_at.desc()).limit(100)).all()
+    return [support_ticket_out(x,db,True) for x in rows]
+
+@app.post('/api/support/tickets/{ticket_id}/messages')
+def reply_support_ticket(ticket_id:int,data:SupportMessageIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    ticket=db.get(SupportTicket,ticket_id)
+    if not ticket or (ticket.user_id!=user.id and user.role!='admin'): raise HTTPException(404,'تذكرة الدعم غير موجودة')
+    if ticket.status in ('resolved','closed') and user.role!='admin': raise HTTPException(409,'تم إغلاق التذكرة؛ تواصل مع الإدارة لفتحها مجددًا')
+    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,body=data.body.strip()))
+    ticket.updated_at=datetime.now(timezone.utc)
+    if user.role=='admin' and ticket.status=='open': ticket.status='in_progress'
+    if user.role!='admin':
+        owner=db.get(User,ticket.user_id)
+        for admin_user in db.scalars(select(User).where(User.role=='admin',User.status=='active')).all():
+            notify_user(db,admin_user.id,'رد جديد على تذكرة دعم',f'{owner.name if owner else "مستخدم"} — {ticket.subject}','/control')
+    else:
+        notify_user(db,ticket.user_id,'رد جديد من دعم وصلة',ticket.subject,'/dashboard')
+    db.commit(); db.refresh(ticket)
+    return support_ticket_out(ticket,db,True)
+
+@app.get('/api/admin/support/tickets')
+def admin_support_tickets(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(SupportTicket).order_by(SupportTicket.updated_at.desc()).limit(300)).all()
+    return [support_ticket_out(x,db,True) for x in rows]
+
+@app.patch('/api/admin/support/tickets/{ticket_id}')
+def update_support_ticket(ticket_id:int,data:SupportTicketUpdateIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    ticket=db.get(SupportTicket,ticket_id)
+    if not ticket: raise HTTPException(404,'تذكرة الدعم غير موجودة')
+    changes=data.model_dump(exclude_unset=True)
+    if 'status' in changes and changes['status'] not in ('open','in_progress','resolved','closed'): raise HTTPException(400,'حالة التذكرة غير صحيحة')
+    if 'priority' in changes and changes['priority'] not in ('low','normal','high','urgent'): raise HTTPException(400,'أولوية التذكرة غير صحيحة')
+    for key,value in changes.items(): setattr(ticket,key,value)
+    ticket.updated_at=datetime.now(timezone.utc)
+    db.commit(); db.refresh(ticket)
+    return support_ticket_out(ticket,db,True)
+
+def coupon_out(c):
+    return {'id':c.id,'code':c.code,'discount_type':c.discount_type,'discount_value':float(c.discount_value),
+        'min_order_total':float(c.min_order_total),'max_discount':float(c.max_discount) if c.max_discount is not None else None,
+        'usage_limit':c.usage_limit,'used_count':c.used_count,'starts_at':c.starts_at.isoformat() if c.starts_at else None,
+        'ends_at':c.ends_at.isoformat() if c.ends_at else None,'is_active':c.is_active}
+
+@app.get('/api/admin/coupons')
+def admin_coupons(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.scalars(select(Coupon).order_by(Coupon.created_at.desc()).limit(300)).all()
+    return [coupon_out(x) for x in rows]
+
+@app.post('/api/admin/coupons')
+def create_coupon(data:CouponIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    code=data.code.strip().upper()
+    if not re.fullmatch(r'[A-Z0-9_-]{3,40}',code): raise HTTPException(400,'الكود يجب أن يحتوي على حروف إنجليزية أو أرقام فقط')
+    if data.discount_type not in ('percent','fixed'): raise HTTPException(400,'نوع الخصم غير صحيح')
+    if data.discount_type=='percent' and data.discount_value>100: raise HTTPException(400,'نسبة الخصم لا يمكن أن تتجاوز 100%')
+    if data.starts_at and data.ends_at and data.ends_at<=data.starts_at: raise HTTPException(400,'موعد انتهاء الكوبون يجب أن يكون بعد بدايته')
+    if db.scalar(select(Coupon.id).where(Coupon.code==code)): raise HTTPException(409,'كود الخصم مستخدم بالفعل')
+    item=Coupon(code=code,discount_type=data.discount_type,discount_value=data.discount_value,min_order_total=data.min_order_total,
+        max_discount=data.max_discount,usage_limit=data.usage_limit,starts_at=data.starts_at,ends_at=data.ends_at,created_by=user.id)
+    db.add(item); db.commit(); db.refresh(item)
+    return coupon_out(item)
+
+@app.patch('/api/admin/coupons/{coupon_id}')
+def update_coupon(coupon_id:int,data:CouponUpdateIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    item=db.get(Coupon,coupon_id)
+    if not item: raise HTTPException(404,'الكوبون غير موجود')
+    changes=data.model_dump(exclude_unset=True)
+    if 'ends_at' in changes and changes['ends_at'] and item.starts_at and changes['ends_at']<=item.starts_at: raise HTTPException(400,'موعد انتهاء الكوبون يجب أن يكون بعد بدايته')
+    for key,value in changes.items(): setattr(item,key,value)
+    db.commit(); db.refresh(item)
+    return coupon_out(item)
+
+@app.get('/api/affiliate/wallet')
+def affiliate_wallet(user:User=Depends(require_role('affiliate','admin')),limit:int=Query(default=100,ge=1,le=300),db:Session=Depends(get_db)):
+    earned=db.scalar(select(func.coalesce(func.sum(WalletTransaction.amount),0)).where(WalletTransaction.user_id==user.id)) or 0
+    rows=db.scalars(select(WalletTransaction).where(WalletTransaction.user_id==user.id).order_by(WalletTransaction.created_at.desc()).limit(limit)).all()
+    return {'balance':round(float(earned),2),'transactions':[{'id':x.id,'amount':float(x.amount),'kind':x.kind,'description':x.description,'created_at':x.created_at.isoformat()} for x in rows]}
 
 # Optional first administrator bootstrap: set ADMIN_EMAIL and ADMIN_PASSWORD before first run.
 def bootstrap_admin():
