@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Integer, Float, Numeric, DateTime, ForeignKey, Text, UniqueConstraint, JSON, Boolean
+from sqlalchemy import String, Integer, BigInteger, Float, Numeric, DateTime, ForeignKey, Text, UniqueConstraint, JSON, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
@@ -341,7 +341,7 @@ class WalletTransaction(Base):
     amount: Mapped[float]=mapped_column(Numeric(12,2))
     kind: Mapped[str]=mapped_column(String(24))
     reference_type: Mapped[str]=mapped_column(String(24))
-    reference_id: Mapped[int]=mapped_column(Integer)
+    reference_id: Mapped[int]=mapped_column(BigInteger)
     description: Mapped[str]=mapped_column(String(240),default='')
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
     __table_args__=(UniqueConstraint('user_id','kind','reference_type','reference_id'),)
