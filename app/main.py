@@ -99,6 +99,34 @@ def require_role(*roles):
         return user
     return dep
 
+
+@app.middleware('http')
+async def capture_admin_activity(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith('/api/admin/') and request.method in ('POST','PATCH','PUT','DELETE'):
+        db = SessionLocal()
+        try:
+            token = request.cookies.get('wesla_session')
+            if token:
+                token_hash = hashlib.sha256(token.encode()).hexdigest()
+                session = db.scalar(select(AuthSession).where(AuthSession.token_hash == token_hash))
+                actor = db.get(User, session.user_id) if session else None
+                enabled = db.execute(text("select is_enabled from wesla_feature_settings where feature_key='admin_activity_log'")).scalar()
+                if actor and actor.role == 'admin' and enabled:
+                    target_match = re.search(r'/([0-9]+)(?:/|$)', path)
+                    db.execute(text("""
+                      insert into wesla_admin_activity_log(actor_user_id,actor_name,action,request_path,target_id,status_code)
+                      values (:actor,:name,:action,:path,:target,:status)
+                    """), {'actor':actor.id,'name':actor.name,'action':request.method,'path':path,
+                           'target':int(target_match.group(1)) if target_match else None,'status':response.status_code})
+                    db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+    return response
+
 PUBLIC_EVENT_TABLES = {'products', 'product_variants', 'product_images', 'announcements', 'site_settings'}
 
 def require_admin_stream_access(request: Request):
@@ -1738,7 +1766,7 @@ FEATURE_READY = {
     'referrals': True, 'rewards': True, 'trends': False, 'challenges': False,
     'achievements': False, 'academy': False,
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
-    'fraud_detection': False, 'admin_activity_log': False, 'smart_marketer_matching': False,
+    'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
     'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
     'advanced_order_tracking': False, 'premium_subscriptions': False, 'ads_center': False,
     'marketing_library': False, 'wallet_ledger': False, 'disputes_center': False,
@@ -1756,6 +1784,16 @@ def advanced_feature_status(db: Session = Depends(get_db)):
     rows = db.execute(text("select feature_key,is_enabled from wesla_feature_settings")).mappings().all()
     stored = {r['feature_key']: bool(r['is_enabled']) for r in rows}
     return {key: bool(FEATURE_READY[key] and stored.get(key, False)) for key in FEATURE_KEYS}
+
+@app.get('/api/admin/activity-log')
+def list_admin_activity_log(limit: int = Query(default=200, ge=1, le=500), user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+      select l.id,coalesce(l.actor_name,u.name,'مدير سابق') as actor_name,l.action,l.request_path,
+             l.target_id,l.status_code,l.created_at
+      from wesla_admin_activity_log l left join users u on u.id=l.actor_user_id
+      order by l.created_at desc,l.id desc limit :limit
+    """), {'limit':limit}).mappings().all()
+    return [dict(x) for x in rows]
 
 @app.get('/api/admin/advanced/settings')
 def admin_advanced_settings(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
