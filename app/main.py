@@ -2209,12 +2209,12 @@ def admin_referral_rewards_config(user: User = Depends(require_role('admin')), d
 def admin_update_referral_rewards_config(data: ReferralRewardConfigIn, user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
     db.execute(text("""
       insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
-      values ('referrals',true,'["all"]'::jsonb,jsonb_build_object('referral_reward_points',:points),now())
+      values ('referrals',true,'["all"]'::jsonb,jsonb_build_object('referral_reward_points'::text,CAST(:points AS integer)),now())
       on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,is_enabled=true,updated_at=now()
     """), {'points':data.referral_reward_points})
     db.execute(text("""
       insert into wesla_feature_settings(feature_key,is_enabled,audience,config,updated_at)
-      values ('rewards',true,'["all"]'::jsonb,jsonb_build_object('purchase_points_per_100_egp',:points),now())
+      values ('rewards',true,'["all"]'::jsonb,jsonb_build_object('purchase_points_per_100_egp'::text,CAST(:points AS integer)),now())
       on conflict(feature_key) do update set config=wesla_feature_settings.config || excluded.config,is_enabled=true,updated_at=now()
     """), {'points':data.purchase_points_per_100_egp})
     db.commit()
