@@ -84,7 +84,7 @@ function renderAnnouncementRow(a){
 }
 function editAnnouncement(id){
  const a=announcementRows.find(x=>x.id===id);if(!a)return;
- const form=$('#announcementForm');for(const [k,v] of Object.entries(a)){const input=form.elements[k];if(!input)continue;input.value=(k==='starts_at'||k==='ends_at')&&v?new Date(v).toISOString().slice(0,16):v??'';}
+ const form=$('#announcementForm');for(const [k,v] of Object.entries(a)){const input=form.elements[k];if(!input)continue;if(k==='starts_at'||k==='ends_at'){if(v){const d=new Date(v);d.setMinutes(d.getMinutes()-d.getTimezoneOffset());input.value=d.toISOString().slice(0,16)}else input.value=''}else input.value=v??'';}
  form.elements.id.value=String(a.id);$('#announcementSave').textContent='حفظ التعديلات';$('#announcementCancel').style.display='inline-block';form.scrollIntoView({behavior:'smooth',block:'start'});
 }
 function cancelAnnouncementEdit(){const form=$('#announcementForm');form.reset();form.elements.id.value='';form.elements.priority.value='0';$('#announcementSave').textContent='نشر الإعلان';$('#announcementCancel').style.display='none'}
