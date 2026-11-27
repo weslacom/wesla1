@@ -2818,7 +2818,7 @@ def my_disputes(user:User=Depends(current_user),db:Session=Depends(get_db)):
     if not wesla_feature_enabled(db,'disputes_center',False): raise HTTPException(404,'مركز النزاعات غير متاح')
     rows=db.execute(text("""select d.id,o.order_number,d.reason,d.details,d.status,d.resolution,d.created_at,d.updated_at
       from wesla_disputes d join orders o on o.id=d.order_id
-      where d.opened_by_user_id=:uid or o.customer_user_id=:uid or o.merchant_id=:uid
+      where d.opened_by_user_id=:uid or o.customer_user_id=:uid or o.merchant_id=:uid or o.affiliate_id=:uid
       order by d.updated_at desc limit 100"""),{'uid':user.id}).mappings().all()
     return [dict(x) for x in rows]
 
@@ -2948,6 +2948,15 @@ def set_competition_score(competition_id:int,marketer_id:int,data:dict,user:User
     db.execute(text("""insert into wesla_competition_entries(competition_id,marketer_id,score) values (:cid,:uid,:score)
       on conflict(competition_id,marketer_id) do update set score=excluded.score"""),{'cid':competition_id,'uid':marketer_id,'score':score})
     db.commit();return {'ok':True}
+
+@app.get('/api/advanced/competitions/{competition_id}/leaderboard')
+def competition_leaderboard(competition_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'marketer_competitions',False): raise HTTPException(404,'المسابقات غير متاحة')
+    exists=db.scalar(select(func.count()).select_from(text('wesla_competitions')).where(text('id=:id and is_active=true and starts_at<=now() and ends_at>now()')).params(id=competition_id))
+    if not exists: raise HTTPException(404,'المسابقة غير متاحة')
+    rows=db.execute(text("""select e.marketer_id,u.name,e.score from wesla_competition_entries e
+      join users u on u.id=e.marketer_id where e.competition_id=:id order by e.score desc,e.created_at asc limit 50"""),{'id':competition_id}).mappings().all()
+    return [{'rank':i+1,'name':x['name'],'score':float(x['score']),'is_me':x['marketer_id']==user.id} for i,x in enumerate(rows)]
 
 @app.get('/api/admin/advanced/competitions')
 def admin_competitions(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
