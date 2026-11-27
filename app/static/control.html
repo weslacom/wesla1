@@ -48,7 +48,7 @@ function startAdminRealtime(){
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshActiveSection()});
 $('#loginForm').onsubmit=async e=>{e.preventDefault();try{let d=await api('/api/admin/password-login',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});await start(d.user)}catch(x){msg(x.message,true)}};
-async function start(user){startAdminRealtime();$('#login').classList.add('hidden');$('#app').classList.remove('hidden');$('#logout').classList.remove('hidden');$('#changePass').classList.remove('hidden');$('#welcome').textContent='مرحباً '+user.name+' — صلاحية مدير المنصة';$('#tabs').innerHTML='';[['نظرة عامة',overview,'📊'],['العقود',contracts,'📄'],['هوية التوقيع والختم',contractBrandAssets,'🖋️'],['اتفاقية جديدة',newContract,'✍️'],['طلبات التعاقد',contractRequests,'📝'],['التفاوض',negotiationsAdmin,'🤝'],['الفسخ',terminationRequests,'⚖️'],['المنتجات',adminProducts,'📦'],['التجار',()=>accountsAdmin('merchant'),'🏪'],['العملاء',()=>accountsAdmin('customer'),'🛍️'],['المسوقون',()=>accountsAdmin('affiliate'),'📣'],['كل الحسابات',()=>accountsAdmin('all'),'👥'],['الزوار',visitorAdmin,'👁️'],['صفحات الموقع',pagesAdmin,'📄'],['دعوة الأصدقاء والمكافآت',referralsRewardsAdmin,'🎁'],['الأنظمة الذكية والمتقدمة',advancedFeaturesAdmin,'🧠'],['سجل العمليات الإدارية',adminActivityLog,'📋'],['الانضمام',applications,'📨'],['الطلبات',orders,'🛒'],['السحب',payouts,'💳'],['الإعلانات',announcements,'📣'],['كوبونات الخصم',couponsAdmin,'🎟️'],['الدعم والشكاوى',supportAdmin,'🎧']].forEach(([name,fn,icon])=>{let b=document.createElement('button');b.innerHTML='<span class="nav-icon">'+icon+'</span><span>'+name+'</span>';b.onclick=()=>{document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeSectionLoader=fn;fn()};$('#tabs').appendChild(b)});$('#tabs button').click()}
+async function start(user){startAdminRealtime();$('#login').classList.add('hidden');$('#app').classList.remove('hidden');$('#logout').classList.remove('hidden');$('#changePass').classList.remove('hidden');$('#welcome').textContent='مرحباً '+user.name+' — صلاحية مدير المنصة';$('#tabs').innerHTML='';[['نظرة عامة',overview,'📊'],['العقود',contracts,'📄'],['هوية التوقيع والختم',contractBrandAssets,'🖋️'],['اتفاقية جديدة',newContract,'✍️'],['طلبات التعاقد',contractRequests,'📝'],['التفاوض',negotiationsAdmin,'🤝'],['الفسخ',terminationRequests,'⚖️'],['المنتجات',adminProducts,'📦'],['التجار',()=>accountsAdmin('merchant'),'🏪'],['العملاء',()=>accountsAdmin('customer'),'🛍️'],['المسوقون',()=>accountsAdmin('affiliate'),'📣'],['كل الحسابات',()=>accountsAdmin('all'),'👥'],['الزوار',visitorAdmin,'👁️'],['صفحات الموقع',pagesAdmin,'📄'],['دعوة الأصدقاء والمكافآت',referralsRewardsAdmin,'🎁'],['الأنظمة الذكية والمتقدمة',advancedFeaturesAdmin,'🧠'],['سجل العمليات الإدارية',adminActivityLog,'📋'],['الانضمام',applications,'📨'],['الطلبات',orders,'🛒'],['السحب',payouts,'💳'],['الإعلانات',announcements,'📣'],['كوبونات الخصم',couponsAdmin,'🎟️'],['الدعم والشكاوى',supportAdmin,'🎧']].forEach(([name,fn,icon])=>{let b=document.createElement('button');b.innerHTML='<span class="nav-icon">'+icon+'</span><span>'+name+'</span>';b.onclick=()=>{document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeSectionLoader=fn;fn()};$('#tabs').appendChild(b)});$('#tabs button').click();refreshAdvancedFeatureNav()}
 $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload()};
 $('#changePass').onclick=()=>$('#passwordPanel').classList.toggle('hidden');$('#cancelPass').onclick=()=>$('#passwordPanel').classList.add('hidden');$('#passwordForm').onsubmit=async e=>{e.preventDefault();try{let d=Object.fromEntries(new FormData(e.target));await api('/api/admin/change-password',{method:'POST',body:JSON.stringify(d)});e.target.reset();$('#passwordPanel').classList.add('hidden');msg('تم تغيير كلمة المرور بنجاح. استخدم الجديدة في المرة القادمة.')}catch(x){msg(x.message,true)}};
 async function overview(){try{let d=await api('/api/admin/overview');$('#content').innerHTML='<div class="row" style="justify-content:space-between"><h2>ملخص المنصة</h2><button class="secondary" onclick="overview()">تحديث البيانات</button></div><div class="grid">'+[['المستخدمون',d.users],['المنتجات المنشورة',d.products],['الطلبات',d.orders],['المبيعات المسلّمة',d.sales+' ج'],['عمولة وصلة المحصلة',d.platform_commission+' ج'],['عمولات المسوقين المستحقة',d.affiliate_commission+' ج'],['الطلبات المسلّمة',d.delivered_orders],['طلبات الانضمام',d.applications],['طلبات السحب',d.payouts]].map(x=>'<div class="card"><div class="muted">'+x[0]+'</div><div class="stat">'+x[1]+'</div></div>').join('')+'</div><p class="muted">يتم احتساب عمولات وصلة والمسوقين في هذا الملخص بعد تحويل حالة الطلب إلى «تم التسليم».</p>'}catch(e){msg(e.message,true)}}
@@ -139,39 +139,75 @@ async function advancedFeaturesAdmin(){
   const rows=await api('/api/admin/advanced/settings');
   const map=Object.fromEntries(rows.map(x=>[x.feature_key,x]));
   const keys=[
-   ['wesla_ai','Wesla AI','مساعدات الذكاء الاصطناعي',false],
-   ['rewards','Wesla Rewards','النقاط والمكافآت',true],
-   ['referrals','Wesla Referral','دعوة الأصدقاء',true],
-   ['trends','Wesla Trends','المنتجات الرائجة',false],
-   ['recommendations','التوصيات الذكية','ترشيحات المنتجات',false],
-   ['challenges','التحديات','التحديات الحالية',false],
-   ['achievements','الشارات والإنجازات','إنجازات المستخدمين',false],
-   ['academy','Wesla Academy','مركز المعرفة',false],
-   ['seasonal_campaigns','الحملات الموسمية','المناسبات والعروض',false],
-   ['fraud_detection','اكتشاف الاحتيال','رصد الأنشطة والإحالات والطلبات المشبوهة',false],
-   ['admin_activity_log','سجل العمليات الإدارية','تسجيل المسؤول ونوع العملية ووقتها ونتيجة التنفيذ',true],
-   ['smart_marketer_matching','ترشيح المسوقين للتجار','مطابقة المسوقين بالمنتجات وفق الأداء الفعلي',false],
-   ['inventory_order_alerts','تنبيهات المخزون والطلبات','تنبيهات انخفاض المخزون وتأخر الطلبات',false],
-   ['marketer_competitions','مسابقات وترتيب المسوقين','مسابقات أسبوعية وشهرية وجوائز',false],
-   ['verified_reviews','التقييمات الموثقة','تقييمات مرتبطة بطلبات مكتملة',false],
-   ['advanced_order_tracking','تتبع الطلبات التفصيلي','خط زمني موثق لحالات الطلب',true],
-   ['premium_subscriptions','اشتراكات وصلة المدفوعة','باقات التجار والمسوقين والفواتير',false],
-   ['ads_center','مركز الإعلانات المدفوعة','حملات إعلانية مدفوعة وتقارير الأداء',false],
-   ['marketing_library','مكتبة المواد الإعلانية','ملفات وصور وفيديوهات التاجر للمسوقين',false],
-   ['wallet_ledger','المحفظة المالية التفصيلية','سجل مالي مترابط للأرصدة والحركات',false],
-   ['disputes_center','مركز النزاعات والوساطة','شكاوى وأدلة وتسويات موثقة',false],
-   ['bulk_product_import','الاستيراد الجماعي للمنتجات','استيراد CSV وExcel مع معاينة',false],
-   ['price_drop_alerts','تنبيهات انخفاض الأسعار','متابعة الأسعار وإشعارات الانخفاض',false],
-   ['bundles_deals','العروض والباقات المشتركة','باقات منتجات من تاجر أو أكثر',false]
+   ['wesla_ai','Wesla AI','مساعدات الذكاء الاصطناعي','🤖'],
+   ['rewards','Wesla Rewards','النقاط والمكافآت','🎁'],
+   ['referrals','Wesla Referral','دعوة الأصدقاء','👥'],
+   ['trends','Wesla Trends','المنتجات الرائجة','📈'],
+   ['recommendations','التوصيات الذكية','ترشيحات المنتجات','✨'],
+   ['challenges','التحديات','التحديات الحالية','🏆'],
+   ['achievements','الشارات والإنجازات','إنجازات المستخدمين','🏅'],
+   ['academy','Wesla Academy','مركز المعرفة','🎓'],
+   ['seasonal_campaigns','الحملات الموسمية','المناسبات والعروض','🗓️'],
+   ['fraud_detection','اكتشاف الاحتيال','رصد الأنشطة والإحالات والطلبات المشبوهة','🛡️'],
+   ['admin_activity_log','سجل العمليات الإدارية','تسجيل المسؤول ونوع العملية ووقتها ونتيجة التنفيذ','📋'],
+   ['smart_marketer_matching','ترشيح المسوقين للتجار','مطابقة المسوقين بالمنتجات وفق الأداء الفعلي','🧩'],
+   ['inventory_order_alerts','تنبيهات المخزون والطلبات','تنبيهات انخفاض المخزون وتأخر الطلبات','📦'],
+   ['marketer_competitions','مسابقات وترتيب المسوقين','مسابقات أسبوعية وشهرية وجوائز','🥇'],
+   ['verified_reviews','التقييمات الموثقة','تقييمات مرتبطة بطلبات مكتملة','⭐'],
+   ['advanced_order_tracking','تتبع الطلبات التفصيلي','خط زمني موثق لحالات الطلب','🚚'],
+   ['premium_subscriptions','اشتراكات وصلة المدفوعة','باقات التجار والمسوقين والفواتير','💎'],
+   ['ads_center','مركز الإعلانات المدفوعة','حملات إعلانية مدفوعة وتقارير الأداء','📢'],
+   ['marketing_library','مكتبة المواد الإعلانية','ملفات وصور وفيديوهات التاجر للمسوقين','🗂️'],
+   ['wallet_ledger','المحفظة المالية التفصيلية','سجل مالي مترابط للأرصدة والحركات','💳'],
+   ['disputes_center','مركز النزاعات والوساطة','شكاوى وأدلة وتسويات موثقة','⚖️'],
+   ['bulk_product_import','الاستيراد الجماعي للمنتجات','استيراد CSV وExcel مع معاينة','📥'],
+   ['price_drop_alerts','تنبيهات انخفاض الأسعار','متابعة الأسعار وإشعارات الانخفاض','🔔'],
+   ['bundles_deals','العروض والباقات المشتركة','باقات منتجات من تاجر أو أكثر','🎀']
   ];
-  $('#content').innerHTML='<h2>مركز التحكم في الأنظمة الذكية والمتقدمة</h2><p class="small">لكل نظام مفتاح مستقل. الأنظمة المكتملة يمكن تشغيلها أو إيقافها فورًا. الأنظمة التي ما زالت قيد التنفيذ تظل غير قابلة للتفعيل حتى اكتمال ربطها واختبارها، ولا يؤدي إيقاف أي نظام إلى حذف بياناته.</p>'+keys.map(([key,title,desc,ready])=>{const x=map[key]||{};const enabled=ready&&!!x.is_enabled;return '<div class="item"><div class="row" style="justify-content:space-between;align-items:center"><div><b>'+title+'</b><p class="small">'+desc+'</p><span class="small">'+(ready?'جاهز للتحكم':'قيد التنفيذ والاختبار')+'</span></div><label><input type="checkbox" id="feature-'+key+'" '+(enabled?'checked':'')+(ready?'':' disabled')+' style="width:auto"> '+(enabled?'مفعّل':'متوقف')+'</label></div>'+(ready?'<button class="secondary" data-feature-save="'+key+'">حفظ حالة النظام</button>':'<p class="small">سيظهر مفتاح التفعيل عند اكتمال الوظائف والاختبارات.</p>')+'</div>'}).join('')+'<h3>مؤشرات المنتجات الرائجة</h3><div id="adminTrendPreview" class="item">جارٍ تحميل المؤشرات…</div>';
-  document.querySelectorAll('[data-feature-save]').forEach(b=>b.onclick=()=>saveAdvancedFeature(b.dataset.featureSave));
+  $('#content').innerHTML='<h2>مركز التحكم في الأنظمة الذكية والمتقدمة</h2><p class="small">كل الأنظمة متاحة للتحكم المستقل. شغّل النظام ليظهر اختصاره المثبّت أسفل لوحة الإدارة، وأوقفه لإزالة الاختصار فورًا. إيقاف النظام لا يحذف بياناته أو إعداداته.</p>'+keys.map(([key,title,desc,icon])=>{const x=map[key]||{};const enabled=!!x.is_enabled;return '<div class="item"><div class="row" style="justify-content:space-between;align-items:center"><div><b>'+icon+' '+title+'</b><p class="small">'+desc+'</p><span class="small" id="feature-state-'+key+'">'+(enabled?'مفعّل — اختصاره ظاهر أسفل اللوحة':'متوقف — الاختصار مخفي')+'</span></div><label><input type="checkbox" id="feature-'+key+'" '+(enabled?'checked':'')+' style="width:auto"> '+(enabled?'مفعّل':'متوقف')+'</label></div></div>'}).join('')+'<h3>مؤشرات المنتجات الرائجة</h3><div id="adminTrendPreview" class="item">جارٍ تحميل المؤشرات…</div>';
+  keys.forEach(([key])=>{const el=$('#feature-'+key);el.onchange=()=>saveAdvancedFeature(key)});
   try{const t=await api('/api/advanced/trends?period=7&limit=10');$('#adminTrendPreview').innerHTML=t.items&&t.items.length?t.items.map(p=>'<p><b>'+esc(p.title)+'</b> — مشاهدات '+p.views+' | طلبات '+p.order_signals+' | التفاعل '+p.trend_score+'</p>').join(''):'<p class="muted">لا توجد بيانات ترند كافية حتى الآن.</p>'}catch(e){$('#adminTrendPreview').textContent='تعذر تحميل مؤشرات الترند: '+e.message}
  }catch(e){msg(e.message,true)}
 }
+const ADVANCED_FEATURE_META={
+ wesla_ai:['Wesla AI','🤖'],rewards:['Wesla Rewards','🎁'],referrals:['دعوة الأصدقاء','👥'],trends:['Wesla Trends','📈'],recommendations:['التوصيات الذكية','✨'],challenges:['التحديات','🏆'],achievements:['الشارات والإنجازات','🏅'],academy:['Wesla Academy','🎓'],seasonal_campaigns:['الحملات الموسمية','🗓️'],fraud_detection:['اكتشاف الاحتيال','🛡️'],admin_activity_log:['سجل العمليات الإدارية','📋'],smart_marketer_matching:['ترشيح المسوقين','🧩'],inventory_order_alerts:['تنبيهات المخزون','📦'],marketer_competitions:['مسابقات المسوقين','🥇'],verified_reviews:['التقييمات الموثقة','⭐'],advanced_order_tracking:['تتبع الطلبات','🚚'],premium_subscriptions:['الاشتراكات المدفوعة','💎'],ads_center:['مركز الإعلانات','📢'],marketing_library:['مكتبة المواد الإعلانية','🗂️'],wallet_ledger:['المحفظة المالية','💳'],disputes_center:['النزاعات والوساطة','⚖️'],bulk_product_import:['الاستيراد الجماعي','📥'],price_drop_alerts:['تنبيهات الأسعار','🔔'],bundles_deals:['العروض والباقات','🎀']
+};
+async function refreshAdvancedFeatureNav(){
+ const nav=$('#tabs');if(!nav)return;
+ nav.querySelectorAll('[data-advanced-feature-nav]').forEach(x=>x.remove());
+ try{
+  const rows=await api('/api/admin/advanced/settings');
+  rows.filter(x=>x.is_enabled&&ADVANCED_FEATURE_META[x.feature_key]).forEach(x=>{
+   const [label,icon]=ADVANCED_FEATURE_META[x.feature_key],b=document.createElement('button');
+   b.dataset.advancedFeatureNav=x.feature_key;
+   b.innerHTML='<span class="nav-icon">'+icon+'</span><span>'+label+'</span>';
+   b.onclick=()=>{document.querySelectorAll('#tabs button').forEach(y=>y.classList.remove('active'));b.classList.add('active');activeSectionLoader=()=>advancedFeatureHub(x.feature_key);advancedFeatureHub(x.feature_key)};
+   nav.appendChild(b);
+  });
+ }catch(e){console.warn('تعذر تحديث اختصارات الأنظمة',e)}
+}
+async function advancedFeatureHub(key){
+ const meta=ADVANCED_FEATURE_META[key];if(!meta)return;
+ const [label,icon]=meta;
+ const descriptions={trends:'المنتجات الأعلى تفاعلًا خلال آخر 7 أيام',recommendations:'منطقة التوصيات الذكية للمنتجات',challenges:'التحديات النشطة ومشاركة المستخدمين',achievements:'الشارات والإنجازات المسجلة',academy:'المحتوى التعليمي المنشور',wesla_ai:'مركز مساعدات الذكاء الاصطناعي',premium_subscriptions:'إدارة باقات واشتراكات وصلة',ads_center:'إدارة الحملات الإعلانية المدفوعة',marketing_library:'المواد الإعلانية المتاحة للتجار والمسوقين',wallet_ledger:'الحركات والأرصدة المالية',disputes_center:'النزاعات وطلبات الوساطة',bulk_product_import:'استيراد قوائم المنتجات',price_drop_alerts:'متابعة انخفاض أسعار المنتجات',bundles_deals:'العروض والباقات المشتركة'};
+ let body='<p class="muted">تم تفعيل هذا النظام. يمكنك إيقافه في أي وقت من مركز الأنظمة المتقدمة.</p>';
+ try{
+  if(key==='trends'){const d=await api('/api/advanced/trends?period=7&limit=30');body+=(d.items||[]).map(p=>'<div class="item"><b>'+esc(p.title)+'</b><p class="small">مشاهدات '+p.views+' · مفضلة '+p.favorites+' · طلبات '+p.order_signals+' · مؤشر التفاعل '+p.trend_score+'</p></div>').join('')||'<p class="muted">لا توجد بيانات تفاعل كافية بعد.</p>'}
+  else if(key==='challenges'){const d=await api('/api/advanced/challenges');body+=(d||[]).map(x=>'<div class="item"><b>'+esc(x.title)+'</b><p>'+esc(x.description||'')+'</p><p class="small">نقاط المكافأة: '+x.reward_points+' · نهاية التحدي: '+esc(x.ends_at)+'</p></div>').join('')||'<p class="muted">لا توجد تحديات نشطة حاليًا.</p>'}
+  else if(key==='academy'){const d=await api('/api/advanced/academy?audience=all');body+=(d||[]).map(x=>'<div class="item"><b>'+esc(x.title)+'</b><p class="small">'+esc(x.content_type)+' · '+esc(x.audience)+'</p><p>'+esc(x.body||'')+'</p>'+(x.media_url?'<a target="_blank" rel="noopener" href="'+escAttr(x.media_url)+'">فتح المادة</a>':'')+'</div>').join('')||'<p class="muted">لا توجد مواد منشورة حاليًا.</p>'}
+  else if(key==='achievements'){body+='<p class="muted">يتم عرض الشارات للمستخدم من حسابه عند استحقاقها. بيانات الشارات مرتبطة بإنجازات الحساب.</p>'}
+ }catch(e){body+='<div class="notice">'+esc(e.message)+'</div>'}
+ $('#content').innerHTML='<h2>'+icon+' '+label+'</h2><p class="small">'+esc(descriptions[key]||'إدارة ومتابعة '+label)+'</p>'+body+'<div class="item"><button class="secondary" onclick="advancedFeaturesAdmin()">العودة إلى إعدادات الأنظمة</button></div>';
+}
 async function saveAdvancedFeature(key){
  const el=$('#feature-'+key);if(!el)return;
- try{await api('/api/admin/advanced/settings/'+key,{method:'PATCH',body:JSON.stringify({is_enabled:el.checked,audience:['all','customer','merchant','affiliate','visitor'],config:{}})});msg('تم حفظ إعداد '+key)}catch(e){msg(e.message,true);el.checked=!el.checked}
+ const wanted=el.checked;
+ try{
+  await api('/api/admin/advanced/settings/'+key,{method:'PATCH',body:JSON.stringify({is_enabled:wanted,audience:['all','customer','merchant','affiliate','visitor','admin'],config:{}})});
+  const state=$('#feature-state-'+key);if(state)state.textContent=wanted?'مفعّل — اختصاره ظاهر أسفل اللوحة':'متوقف — الاختصار مخفي';
+  await refreshAdvancedFeatureNav();
+  msg(wanted?'تم تفعيل النظام وإضافة اختصاره أسفل اللوحة':'تم إيقاف النظام وإزالة اختصاره');
+ }catch(e){msg(e.message,true);el.checked=!wanted}
 }
 async function supportAdmin(){
  try{
