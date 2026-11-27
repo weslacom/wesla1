@@ -1854,6 +1854,7 @@ def advanced_referrals_me(user:User=Depends(current_user),db:Session=Depends(get
 
 @app.get('/api/advanced/trends')
 def advanced_trends(period:int=Query(default=7,ge=1,le=30),limit:int=Query(default=20,ge=1,le=50),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db, 'trends', False): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
     rows=db.execute(text("""
       select p.id,p.title,p.price,p.stock,
         count(*) filter(where e.event_type='view')::int as views,
@@ -1889,6 +1890,7 @@ def advanced_trend_event(product_id:int,data:dict,request:Request,db:Session=Dep
 
 @app.get('/api/advanced/challenges')
 def advanced_challenges(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db, 'challenges', False): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
     rows=db.execute(text("""
       select c.id,c.title,c.description,c.starts_at,c.ends_at,c.reward_points,
         coalesce(cp.status,'not_joined') as my_status
@@ -1909,6 +1911,7 @@ def advanced_join_challenge(challenge_id:int,user:User=Depends(current_user),db:
 
 @app.get('/api/advanced/achievements/me')
 def advanced_achievements_me(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db, 'achievements', False): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
     rows=db.execute(text("""
       select a.code,a.title,a.description,ua.awarded_at
       from wesla_user_achievements ua join wesla_achievements a on a.id=ua.achievement_id
@@ -1918,6 +1921,7 @@ def advanced_achievements_me(user:User=Depends(current_user),db:Session=Depends(
 
 @app.get('/api/advanced/academy')
 def advanced_academy(audience:str='all',db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db, 'academy', False): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
     if audience not in ('all','customer','merchant','affiliate'): audience='all'
     rows=db.execute(text("""
       select id,title,content_type,audience,body,media_url,created_at
@@ -1957,15 +1961,17 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
     db.commit()
     return {'ok':True,'ledger_id':ledger.id,'user_id':target_id,'delta':delta}
 
+# Every feature has an independent admin switch. Feature availability is controlled
+# by the database flag; implementation-specific endpoints still validate their own data.
 FEATURE_READY = {
-    'referrals': True, 'rewards': True, 'trends': False, 'challenges': False,
-    'achievements': False, 'academy': False,
-    'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
-    'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
-    'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
-    'advanced_order_tracking': True, 'premium_subscriptions': False, 'ads_center': False,
-    'marketing_library': False, 'wallet_ledger': False, 'disputes_center': False,
-    'bulk_product_import': False, 'price_drop_alerts': False, 'bundles_deals': False
+    'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
+    'achievements': True, 'academy': True,
+    'wesla_ai': True, 'recommendations': True, 'seasonal_campaigns': True,
+    'fraud_detection': True, 'admin_activity_log': True, 'smart_marketer_matching': True,
+    'inventory_order_alerts': True, 'marketer_competitions': True, 'verified_reviews': True,
+    'advanced_order_tracking': True, 'premium_subscriptions': True, 'ads_center': True,
+    'marketing_library': True, 'wallet_ledger': True, 'disputes_center': True,
+    'bulk_product_import': True, 'price_drop_alerts': True, 'bundles_deals': True
 }
 FEATURE_KEYS = set(FEATURE_READY)
 
