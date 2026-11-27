@@ -2032,8 +2032,8 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
 # Only systems with implemented user-facing flows and real backend routes can be enabled.
 # The remaining switches stay visible in admin as "in development" and are not exposed to users.
 FEATURE_READY = {
-    'referrals': True, 'rewards': True, 'trends': True, 'challenges': False,
-    'achievements': False, 'academy': False,
+    'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
+    'achievements': True, 'academy': False,
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
     'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
     'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
@@ -2571,6 +2571,121 @@ def admin_disable_reward_offer(offer_id: int, user: User = Depends(require_role(
         raise HTTPException(404,'المكافأة غير موجودة')
     db.commit()
     return {'ok':True}
+
+
+# Operational management for challenges and achievements (admin-controlled, persistent).
+@app.get('/api/admin/advanced/challenges')
+def admin_list_challenges(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("select c.*, (select count(*) from wesla_challenge_participations p where p.challenge_id=c.id)::int as participants from wesla_challenges c order by c.created_at desc")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/advanced/challenges')
+def admin_create_challenge(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    title=str(data.get('title','')).strip()
+    description=str(data.get('description','')).strip()
+    try:
+        starts=datetime.fromisoformat(str(data.get('starts_at','')).replace('Z','+00:00'))
+        ends=datetime.fromisoformat(str(data.get('ends_at','')).replace('Z','+00:00'))
+        points=int(data.get('reward_points',0))
+    except (TypeError,ValueError):
+        raise HTTPException(400,'تأكد من تاريخ البداية والنهاية وعدد النقاط')
+    if len(title)<3 or ends<=starts or points<0 or points>100000:
+        raise HTTPException(400,'بيانات التحدي غير صالحة')
+    criteria=data.get('criteria',{})
+    if not isinstance(criteria,dict): raise HTTPException(400,'شروط التحدي غير صحيحة')
+    row=db.execute(text("""insert into wesla_challenges(title,description,starts_at,ends_at,reward_points,criteria,is_active)
+      values (:title,:description,:starts,:ends,:points,cast(:criteria as jsonb),:active) returning id"""),
+      {'title':title[:180],'description':description[:5000],'starts':starts,'ends':ends,'points':points,'criteria':json.dumps(criteria),'active':bool(data.get('is_active',False))}).first()
+    db.commit()
+    return {'ok':True,'id':row.id}
+
+@app.patch('/api/admin/advanced/challenges/{challenge_id}')
+def admin_update_challenge(challenge_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    fields=[]; params={'id':challenge_id}
+    for key,col in [('title','title'),('description','description'),('is_active','is_active'),('reward_points','reward_points'),('criteria','criteria')]:
+        if key in data:
+            val=data[key]
+            if key=='title':
+                val=str(val).strip()
+                if len(val)<3: raise HTTPException(400,'عنوان التحدي قصير')
+                val=val[:180]
+            if key=='description': val=str(val)[:5000]
+            if key=='reward_points':
+                try: val=int(val)
+                except (TypeError,ValueError): raise HTTPException(400,'عدد النقاط غير صحيح')
+                if val<0 or val>100000: raise HTTPException(400,'عدد النقاط غير صحيح')
+            if key=='criteria':
+                if not isinstance(val,dict): raise HTTPException(400,'شروط التحدي غير صحيحة')
+                val=json.dumps(val)
+                fields.append("criteria=cast(:criteria as jsonb)")
+                params['criteria']=val
+                continue
+            fields.append(f"{col}=:{key}")
+            params[key]=val
+    for key in ('starts_at','ends_at'):
+        if key in data:
+            try: params[key]=datetime.fromisoformat(str(data[key]).replace('Z','+00:00'))
+            except (TypeError,ValueError): raise HTTPException(400,'صيغة التاريخ غير صحيحة')
+            fields.append(f"{key}=:{key}")
+    if not fields: raise HTTPException(400,'لا توجد تعديلات')
+    row=db.execute(text("update wesla_challenges set "+','.join(fields)+" where id=:id returning id"),params).first()
+    if not row: raise HTTPException(404,'التحدي غير موجود')
+    db.commit()
+    return {'ok':True}
+
+@app.post('/api/admin/advanced/challenges/{challenge_id}/complete/{participant_id}')
+def admin_complete_challenge(challenge_id:int,participant_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    row=db.execute(text("""select p.user_id,p.status,c.reward_points,c.title from wesla_challenge_participations p
+      join wesla_challenges c on c.id=p.challenge_id where p.id=:pid and p.challenge_id=:cid for update"""),
+      {'pid':participant_id,'cid':challenge_id}).mappings().first()
+    if not row: raise HTTPException(404,'مشاركة التحدي غير موجودة')
+    if row['status']=='completed': raise HTTPException(409,'تم اعتماد إكمال هذا التحدي من قبل')
+    db.execute(text("update wesla_challenge_participations set status='completed',completed_at=now() where id=:pid"),{'pid':participant_id})
+    points=int(row['reward_points'])
+    if points:
+        uid=int(row['user_id'])
+        db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"),{'uid':uid})
+        inserted=db.execute(text("""insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+          values (:uid,:points,'posted',:event,'challenge',:cid,:description) on conflict(event_key) do nothing returning id"""),
+          {'uid':uid,'points':points,'event':f"challenge:{challenge_id}:participant:{participant_id}",'cid':challenge_id,'description':'مكافأة إكمال تحدي: '+row['title']}).first()
+        if inserted:
+            db.execute(text("update wesla_reward_accounts set points_available=points_available+:p,lifetime_earned=lifetime_earned+:p,updated_at=now() where user_id=:uid"),{'p':points,'uid':uid})
+            notify_user(db,uid,'مبروك! أكملت التحدي',f"تم اعتماد إكمال التحدي وحصلت على {points} نقطة.")
+    db.commit()
+    return {'ok':True,'reward_points':points}
+
+@app.get('/api/admin/advanced/achievements')
+def admin_list_achievements(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("select a.*, (select count(*) from wesla_user_achievements ua where ua.achievement_id=a.id)::int as awarded_count from wesla_achievements a order by a.id desc")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/advanced/achievements')
+def admin_create_achievement(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    code=str(data.get('code','')).strip().lower()
+    title=str(data.get('title','')).strip()
+    description=str(data.get('description','')).strip()
+    criteria=data.get('criteria',{})
+    if not re.fullmatch(r'[a-z0-9_-]{3,64}',code) or len(title)<2 or not isinstance(criteria,dict):
+        raise HTTPException(400,'بيانات الشارة غير صالحة')
+    row=db.execute(text("""insert into wesla_achievements(code,title,description,criteria,is_active)
+      values (:code,:title,:description,cast(:criteria as jsonb),:active)
+      on conflict(code) do update set title=excluded.title,description=excluded.description,criteria=excluded.criteria,is_active=excluded.is_active
+      returning id"""),{'code':code,'title':title[:180],'description':description[:3000],'criteria':json.dumps(criteria),'active':bool(data.get('is_active',True))}).first()
+    db.commit()
+    return {'ok':True,'id':row.id}
+
+@app.post('/api/admin/advanced/achievements/{achievement_id}/award/{target_user_id}')
+def admin_award_achievement(achievement_id:int,target_user_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    if not db.get(User,target_user_id): raise HTTPException(404,'المستخدم غير موجود')
+    row=db.execute(text("select id,title from wesla_achievements where id=:id and is_active=true"),{'id':achievement_id}).first()
+    if not row: raise HTTPException(404,'الشارة غير متاحة')
+    inserted=db.execute(text("""insert into wesla_user_achievements(user_id,achievement_id) values (:uid,:aid)
+      on conflict(user_id,achievement_id) do nothing returning id"""),{'uid':target_user_id,'aid':achievement_id}).first()
+    if not inserted: raise HTTPException(409,'المستخدم حصل على هذه الشارة من قبل')
+    notify_user(db,target_user_id,'إنجاز جديد في وصلة',f'حصلت على شارة: {row.title}')
+    db.commit()
+    return {'ok':True,'achievement_id':achievement_id,'user_id':target_user_id}
+
 
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
 # and custom pages work without requiring a special /chat suffix.
