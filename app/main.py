@@ -3207,6 +3207,44 @@ def admin_decide_subscription(subscription_id:int,data:dict,user:User=Depends(re
     db.commit();return {'ok':True,'status':status}
 
 
+
+@app.get('/api/admin/advanced/ai-status')
+def admin_ai_status(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    return {'provider':'OpenAI','configured':bool(os.getenv('OPENAI_API_KEY')),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),
+      'enabled':wesla_feature_enabled(db,'wesla_ai',False)}
+
+@app.post('/api/advanced/ai/assist')
+def wesla_ai_assist(data:dict,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'wesla_ai',False): raise HTTPException(404,'مساعد وصلة الذكي غير معتمد بعد')
+    api_key=os.getenv('OPENAI_API_KEY')
+    if not api_key: raise HTTPException(503,'مفتاح مزود الذكاء الاصطناعي غير مضبوط في إعدادات الخادم')
+    prompt=str(data.get('prompt','')).strip()
+    if len(prompt)<5 or len(prompt)>6000: raise HTTPException(400,'اكتب طلبًا من 5 إلى 6000 حرف')
+    role_context={'merchant':'تاجر على منصة تسويق بالعمولة','affiliate':'مسوق بالعمولة','customer':'عميل في متجر إلكتروني'}.get(user.role,'مستخدم')
+    payload={'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'messages':[
+      {'role':'system','content':'أنت مساعد وصلة الذكي. أجب بالعربية الواضحة، وقدم نصائح عملية آمنة تخص التجارة الإلكترونية والتسويق بالعمولة وإدارة المنتجات والطلبات. لا تختلق بيانات المنصة ولا تدعي تنفيذ عمليات مالية أو تغييرات فعلية. دور المستخدم: '+role_context},
+      {'role':'user','content':prompt}],'temperature':0.4,'max_tokens':900}
+    req=urllib.request.Request('https://api.openai.com/v1/chat/completions',data=json.dumps(payload).encode(),
+      headers={'Authorization':'Bearer '+api_key,'Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=25) as response: result=json.loads(response.read().decode())
+        answer=result['choices'][0]['message']['content'].strip()
+        usage=result.get('usage',{})
+        db.execute(text("""insert into wesla_ai_usage(user_id,feature_key,provider,input_tokens,output_tokens,status)
+          values (:uid,'wesla_ai','openai',:input,:output,'success')"""),
+          {'uid':user.id,'input':int(usage.get('prompt_tokens',0)),'output':int(usage.get('completion_tokens',0))})
+        db.commit()
+        return {'ok':True,'answer':answer,'usage':{'input_tokens':int(usage.get('prompt_tokens',0)),'output_tokens':int(usage.get('completion_tokens',0))}}
+    except urllib.error.HTTPError as e:
+        db.rollback()
+        if e.code in (401,403): raise HTTPException(503,'مفتاح الذكاء الاصطناعي غير صالح أو لا يملك صلاحية الاستخدام')
+        raise HTTPException(502,'تعذر على مزود الذكاء الاصطناعي إكمال الطلب')
+    except (urllib.error.URLError,TimeoutError):
+        db.rollback();raise HTTPException(504,'انتهت مهلة الاتصال بمزود الذكاء الاصطناعي')
+    except (KeyError,ValueError,TypeError):
+        db.rollback();raise HTTPException(502,'استجابة مزود الذكاء الاصطناعي غير مكتملة')
+
+
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
 # and custom pages work without requiring a special /chat suffix.
 @app.get('/{full_path:path}')
