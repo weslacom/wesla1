@@ -2037,8 +2037,8 @@ FEATURE_READY = {
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
     'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
     'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
-    'advanced_order_tracking': True, 'premium_subscriptions': False, 'ads_center': False,
-    'marketing_library': False, 'wallet_ledger': True, 'disputes_center': False,
+    'advanced_order_tracking': False, 'premium_subscriptions': False, 'ads_center': False,
+    'marketing_library': False, 'wallet_ledger': False, 'disputes_center': False,
     'bulk_product_import': False, 'price_drop_alerts': False, 'bundles_deals': False
 }
 FEATURE_KEYS = set(FEATURE_READY)
