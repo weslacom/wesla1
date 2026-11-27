@@ -967,6 +967,7 @@ class ContractIn(BaseModel):
     body:str=Field(min_length=20,max_length=1800)
     merchant_id:int|None=None
     affiliate_id:int|None=None
+    participant_ids:list[int]=Field(default_factory=list)
     commission_rate:float|None=Field(default=None,ge=0,le=100)
     penalty_terms:str=Field(default='',max_length=400)
     starts_at:datetime|None=None
@@ -981,6 +982,7 @@ class ContractIn(BaseModel):
 class ContractDecision(BaseModel):
     full_name:str=Field(min_length=3,max_length=120)
     accepted:bool
+    signature_data_url:str|None=Field(default=None,max_length=2000000)
 
 class AdminContractApproval(BaseModel):
     accepted:bool
@@ -1005,7 +1007,7 @@ def contract_event(db,c,actor,event,details=None):
 def contract_snapshot_data(c):
     return {
         'number':c.contract_number,'version':c.version,'type':c.contract_type,'title':c.title,'body':c.body,
-        'merchant_id':c.merchant_id,'affiliate_id':c.affiliate_id,
+        'merchant_id':c.merchant_id,'affiliate_id':c.affiliate_id,'participant_ids':list(c.participant_ids or []),
         'commission_rate':str(c.commission_rate) if c.commission_rate is not None else None,
         'commission_scope':c.commission_scope,'penalty_terms':c.penalty_terms,
         'penalty_type':c.penalty_type,'penalty_amount':str(c.penalty_amount) if c.penalty_amount is not None else None,
@@ -1023,12 +1025,12 @@ def contract_snapshot_data(c):
 def stable_contract_json(value):
     return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
 
-def acceptance_evidence_hash(snapshot_hash,user,full_name,accepted_at,ip_address,user_agent,session_fingerprint):
+def acceptance_evidence_hash(snapshot_hash,user,full_name,accepted_at,ip_address,user_agent,session_fingerprint,signature_hash=''):
     evidence={
         'snapshot_hash':snapshot_hash,'user_id':user.id,'account_email':user.email,
         'account_name':user.name,'accepted_name':full_name,'accepted_at':accepted_at.isoformat(),
         'ip_address':ip_address,'user_agent':user_agent,'session_fingerprint':session_fingerprint,
-        'method':'authenticated_explicit_consent',
+        'method':'authenticated_explicit_consent','signature_hash':signature_hash,
     }
     return hashlib.sha256(stable_contract_json(evidence).encode()).hexdigest(),evidence
 
@@ -1050,7 +1052,8 @@ def contract_party_ids(c):
     ids=[]
     if c.contract_type in ('platform_merchant','merchant_affiliate') and c.merchant_id: ids.append(c.merchant_id)
     if c.contract_type in ('platform_affiliate','merchant_affiliate') and c.affiliate_id: ids.append(c.affiliate_id)
-    return ids
+    ids.extend(int(x) for x in (c.participant_ids or []) if str(x).isdigit())
+    return list(dict.fromkeys(ids))
 
 def can_view_contract(c,user):
     return user.role=='admin' or user.id in contract_party_ids(c)
@@ -1063,6 +1066,7 @@ def contract_out(c,db):
     return {'id':c.id,'contract_number':c.contract_number,'version':c.version,'contract_type':c.contract_type,'title':c.title,'body':c.body,
       'merchant_id':c.merchant_id,'merchant_name':merchant.name if merchant else None,
       'affiliate_id':c.affiliate_id,'affiliate_name':affiliate.name if affiliate else None,
+      'participant_ids':list(c.participant_ids or []),'participants':[{'id':uid,'name':db.get(User,uid).name,'email':db.get(User,uid).email,'role':db.get(User,uid).role} for uid in contract_party_ids(c) if db.get(User,uid)],
       'commission_rate':c.commission_rate,'commission_scope':c.commission_scope,'penalty_terms':c.penalty_terms,
       'penalty_type':c.penalty_type,'penalty_amount':c.penalty_amount,'penalty_percent':c.penalty_percent,
       'termination_terms':c.termination_terms,'legal_entity_name':c.legal_entity_name,
@@ -1218,14 +1222,16 @@ def accept_contract(contract_id:int,data:ContractDecision,request:Request,user:U
     token=request.cookies.get('wesla_session','')
     session_fingerprint=hashlib.sha256(token.encode()).hexdigest() if token else ''
     full_name=data.full_name.strip()
-    digest,evidence=acceptance_evidence_hash(snapshot_hash,user,full_name,accepted_at,ip_address,user_agent,session_fingerprint)
-    db.add(ContractAcceptance(contract_id=c.id,user_id=user.id,full_name=full_name,document_hash=digest,accepted_at=accepted_at,ip_address=ip_address,user_agent=user_agent))
-    contract_event(db,c,user,'party_accepted',{'name':full_name,'document_hash':digest,'snapshot_hash':snapshot_hash,'evidence':evidence})
+    signature_data=validate_brand_png(data.signature_data_url,'توقيع الطرف') if data.signature_data_url else None
+    signature_hash=hashlib.sha256(signature_data.encode()).hexdigest() if signature_data else ''
+    digest,evidence=acceptance_evidence_hash(snapshot_hash,user,full_name,accepted_at,ip_address,user_agent,session_fingerprint,signature_hash)
+    db.add(ContractAcceptance(contract_id=c.id,user_id=user.id,full_name=full_name,document_hash=digest,accepted_at=accepted_at,ip_address=ip_address,user_agent=user_agent,signature_data_url=signature_data))
+    contract_event(db,c,user,'party_accepted',{'name':full_name,'document_hash':digest,'snapshot_hash':snapshot_hash,'signature_hash':signature_hash,'evidence':evidence})
     db.flush()
     signed=db.scalars(select(ContractAcceptance).where(ContractAcceptance.contract_id==c.id)).all()
     required=contract_party_ids(c)
     all_parties_signed=bool(required) and all(any(a.user_id==uid for a in signed) for uid in required)
-    if all_parties_signed and c.contract_type=='merchant_affiliate':
+    if all_parties_signed and c.contract_type in ('merchant_affiliate','multi_party'):
         finalize_contract(db,c,user)
     elif all_parties_signed and c.contract_type in ('platform_merchant','platform_affiliate'):
         contract_event(db,c,user,'parties_signed_waiting_admin',{'snapshot_hash':snapshot_hash,'party_ids':required})
@@ -1264,12 +1270,17 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     penalty_amount_text=(f'{safe((snapshot or {}).get('penalty_amount',c.penalty_amount))} جنيه مصري' if c.penalty_amount is not None else 'غير محدد')
     penalty_percent_text=(f'{safe((snapshot or {}).get('penalty_percent',c.penalty_percent))}%' if c.penalty_percent is not None else 'غير محددة')
     signature_cards=[]
-    parties=[('التاجر',merchant,c.merchant_id),('المسوق',affiliate,c.affiliate_id)]
+    parties=[]
+    role_labels={'merchant':'التاجر','affiliate':'المسوق','customer':'العميل'}
+    for uid in contract_party_ids(c):
+        account=db.get(User,uid)
+        if account: parties.append((role_labels.get(account.role,'الطرف المتعاقد'),account,uid))
     for role,account,uid in parties:
         if not account: continue
         accepted=next((a for a in acceptances if a.user_id==uid),None)
         if accepted:
-            signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="signature-name">{safe(accepted.full_name)}</div><div class="meta-row"><b>حساب الطرف:</b> {safe(account.name)} — {safe(account.email)} — #{safe(account.id)}</div><div class="meta-row"><b>وقت الموافقة:</b> {safe(accepted.accepted_at.isoformat())}</div><div class="meta-row"><b>وسيلة الإثبات:</b> موافقة صريحة من جلسة حساب مسجل</div><div class="meta-row"><b>عنوان الاتصال المسجل:</b> {safe(accepted.ip_address or 'غير متاح')}</div><div class="meta-row"><b>بيئة المتصفح:</b> {safe(accepted.user_agent or 'غير متاحة')}</div><div class="meta-row"><b>بصمة الموافقة SHA-256:</b><span class="hash">{safe(accepted.document_hash)}</span></div><div class="signed-status">موافقة إلكترونية مسجلة</div></section>')
+            signature_image=(f'<img class="party-signature-image" src="{safe(accepted.signature_data_url)}" alt="توقيع {safe(role)}">' if accepted.signature_data_url else '<div class="no-signature">موافقة إلكترونية مسجلة دون صورة توقيع</div>')
+            signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div>{signature_image}<div class="signature-name">{safe(accepted.full_name)}</div><div class="meta-row"><b>حساب الطرف:</b> {safe(account.name)} — {safe(account.email)} — #{safe(account.id)}</div><div class="meta-row"><b>وقت الموافقة:</b> {safe(accepted.accepted_at.isoformat())}</div><div class="meta-row"><b>وسيلة الإثبات:</b> موافقة صريحة من جلسة حساب مسجل</div><div class="meta-row"><b>عنوان الاتصال المسجل:</b> {safe(accepted.ip_address or 'غير متاح')}</div><div class="meta-row"><b>بيئة المتصفح:</b> {safe(accepted.user_agent or 'غير متاحة')}</div><div class="meta-row"><b>بصمة الموافقة SHA-256:</b><span class="hash">{safe(accepted.document_hash)}</span></div><div class="signed-status">موافقة إلكترونية مسجلة</div></section>')
         else:
             signature_cards.append(f'<section class="signature-card"><div class="party-role">{safe(role)}</div><div class="signature-name">بانتظار الموافقة</div><div class="meta-row">لا يوجد سجل موافقة لهذا الطرف</div></section>')
     if c.contract_type in ('platform_merchant','platform_affiliate'):
@@ -1299,7 +1310,7 @@ def contract_document(contract_id:int,user:User=Depends(current_user),db:Session
     snapshot_hash=final_details.get('snapshot_hash','') if final_details else ''
     html=f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>محضر الاتفاقية {safe(c.contract_number)}</title>
     <style>
-    @page{{size:A4 portrait;margin:5mm}}*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#fff}}body{{font:8px/1.24 Tahoma,Arial,sans-serif;color:#202938}}.paper{{width:100%;min-height:287mm;padding:6px 8px;border:2px double #b9974b;background:#fffdf7}}.brand{{display:flex;align-items:center;justify-content:center;margin:0 0 3px}}.brand-signature{{display:block;width:86px;height:32px}}.brand-signature svg{{width:100%;height:100%;display:block}}.heading{{border-bottom:1px solid #d8c28c;padding-bottom:6px;margin-bottom:8px}}h1{{font-size:13px;color:#80601f;margin:0}}h2{{font-size:8px;color:#34445a;margin:2px 0 0}}h3{{font-size:8.5px;color:#80601f;border-bottom:1px solid #e6d9b7;padding-bottom:2px;margin:5px 0 3px}}.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}}.cell{{background:#f8f4e9;border:1px solid #e6d9b7;padding:5px 7px;border-radius:4px;overflow-wrap:anywhere}}.cell b{{display:block;color:#80601f;font-size:9px}}.body{{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #e6d9b7;padding:4px 6px;background:#fff;border-radius:3px;font-size:7.4px;line-height:1.22}}.clauses{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}}.penalty{{background:#fff7f0;border:1px solid #c67b48;padding:6px 8px;border-radius:4px}}.signature-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:3px}}.brand-identity{{display:flex;align-items:center;justify-content:space-around;gap:8px;margin:4px 0}}.brand-signature-image{{max-width:68%;max-height:48px;object-fit:contain}}.brand-stamp-image{{width:62px;height:62px;object-fit:contain}}.signature-card{{border:1px solid #d7c18e;border-radius:3px;padding:4px;background:#fff;break-inside:avoid;overflow-wrap:anywhere}}.party-role{{font-weight:bold;color:#80601f;font-size:10px}}.signature-name{{font-family:Tahoma,Arial,sans-serif;font-size:13px;font-weight:bold;color:#203b5b;margin:3px 0 5px;min-height:18px}}.meta-row{{font-size:6.5px;margin:1px 0;color:#4b5563;overflow-wrap:anywhere}}.hash{{direction:ltr;display:block;font:8px monospace;overflow-wrap:anywhere}}.signed-status{{font-size:9px;font-weight:bold;color:#28734b;margin-top:4px}}.verified{{background:#e8f6ed;border:1px solid #78b68c;padding:7px;border-radius:4px;color:#17613a;font-weight:bold}}.unverified{{background:#fff4df;border:1px solid #d8a84e;padding:7px;border-radius:4px;color:#81520c;font-weight:bold}}.notice{{border:1px solid #c9d2df;background:#f5f7fa;padding:4px 6px;border-radius:3px;font-size:6.8px;line-height:1.2}}.closing{{text-align:center;font-weight:bold;color:#80601f;border-top:1px solid #d8c28c;margin:4px 0 0;padding-top:3px;font-size:9px}}button{{margin-top:5px;padding:5px 10px;border:0;border-radius:4px;background:#8d6a24;color:white;font:inherit}}@media(max-width:560px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.signature-grid,.clauses{{grid-template-columns:1fr}}.paper{{padding:8px}}}}@media print{{button{{display:none!important}}.paper{{break-inside:auto}}.signature-card,.cell,.penalty{{break-inside:avoid}}*{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}}}
+    @page{{size:A4 portrait;margin:5mm}}*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#fff}}body{{font:8px/1.24 Tahoma,Arial,sans-serif;color:#202938}}.paper{{width:100%;min-height:287mm;padding:9mm;border:3px double #c69b42;background:linear-gradient(145deg,#fff 0%,#f7f9ff 100%)}}.brand{{display:flex;align-items:center;justify-content:center;margin:0 0 3px}}.brand-signature{{display:block;width:86px;height:32px}}.brand-signature svg{{width:100%;height:100%;display:block}}.heading{{border-bottom:2px solid #d0a64c;padding:8px 0;margin-bottom:10px;text-align:center}}h1{{font-size:20px;color:#0d2d5b;margin:0}}h2{{font-size:12px;color:#243d62;margin:4px 0 0}}h3{{font-size:11px;color:#fff;background:linear-gradient(90deg,#0d2d5b,#174d86);border-radius:16px;padding:5px 12px;margin:10px 0 5px;text-align:center}}.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}}.cell{{background:#f4f6fb;border:1px solid #d2dbea;padding:7px 9px;border-radius:8px;overflow-wrap:anywhere}}.cell b{{display:block;color:#173b6b;font-size:9px}}.body{{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #e6d9b7;padding:4px 6px;background:#fff;border-radius:3px;font-size:7.4px;line-height:1.22}}.clauses{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}}.penalty{{background:#fff7f0;border:1px solid #c67b48;padding:6px 8px;border-radius:4px}}.signature-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:7px}}.party-signature-image{{display:block;max-width:90%;width:auto;height:58px;object-fit:contain;margin:6px auto;border-bottom:1px solid #b9c7dc}}.no-signature{{font-size:7px;color:#7b8798;padding:8px 0}}.brand-identity{{display:flex;align-items:center;justify-content:space-around;gap:8px;margin:4px 0}}.brand-signature-image{{max-width:68%;max-height:48px;object-fit:contain}}.brand-stamp-image{{width:62px;height:62px;object-fit:contain}}.signature-card{{border:1px solid #d7c18e;border-radius:3px;padding:4px;background:#fff;break-inside:avoid;overflow-wrap:anywhere}}.party-role{{font-weight:bold;color:#80601f;font-size:10px}}.signature-name{{font-family:Tahoma,Arial,sans-serif;font-size:13px;font-weight:bold;color:#203b5b;margin:3px 0 5px;min-height:18px}}.meta-row{{font-size:6.5px;margin:1px 0;color:#4b5563;overflow-wrap:anywhere}}.hash{{direction:ltr;display:block;font:8px monospace;overflow-wrap:anywhere}}.signed-status{{font-size:9px;font-weight:bold;color:#28734b;margin-top:4px}}.verified{{background:#e8f6ed;border:1px solid #78b68c;padding:7px;border-radius:4px;color:#17613a;font-weight:bold}}.unverified{{background:#fff4df;border:1px solid #d8a84e;padding:7px;border-radius:4px;color:#81520c;font-weight:bold}}.notice{{border:1px solid #c9d2df;background:#f5f7fa;padding:4px 6px;border-radius:3px;font-size:6.8px;line-height:1.2}}.closing{{text-align:center;font-weight:bold;color:#80601f;border-top:1px solid #d8c28c;margin:4px 0 0;padding-top:3px;font-size:9px}}button{{margin-top:5px;padding:5px 10px;border:0;border-radius:4px;background:#8d6a24;color:white;font:inherit}}@media(max-width:560px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.signature-grid,.clauses{{grid-template-columns:1fr}}.paper{{padding:8px}}}}@media print{{button{{display:none!important}}.paper{{break-inside:auto}}.signature-card,.cell,.penalty{{break-inside:avoid}}*{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}}}
     </style></head><body><main class="paper">
     <header class="brand"><span class="brand-signature"><svg viewBox="0 0 520 195" role="img" aria-label="توقيع وصلة" xmlns="http://www.w3.org/2000/svg"><path fill="#b34bdc" fill-rule="evenodd" d="M0,65 L0,79 L13,126 L29,159 L30,165 L36,172 L44,172 L54,163 L79,128 L88,147 L103,162 L112,163 L119,157 L127,141 L135,111 L137,109 L149,121 L154,114 L160,114 L160,112 L149,102 L139,86 L139,82 L133,78 L128,79 L124,86 L123,108 L116,132 L107,147 L99,139 L90,120 L87,108 L86,91 L81,86 L77,86 L72,91 L70,112 L65,125 L42,154 L30,135 L24,120 L13,69 L8,62 L3,62Z M480,50 L472,50 L467,54 L458,48 L451,48 L440,56 L434,68 L432,90 L435,100 L446,110 L457,113 L454,120 L451,122 L456,131 L455,134 L449,138 L450,141 L465,128 L472,116 L475,104 L485,94 L487,85 L495,94 L508,103 L516,103 L519,100 L518,92 L504,84 L498,78 L486,56Z M442,133 L439,132 L433,135 L421,133 L412,127 L400,113 L388,81 L371,8 L366,0 L358,0 L355,7 L365,37 L371,63 L371,84 L368,100 L359,126 L350,142 L330,161 L314,170 L312,169 L318,160 L324,143 L324,128 L321,113 L312,101 L296,96 L293,80 L281,87 L282,97 L273,97 L256,92 L264,84 L272,80 L273,76 L284,68 L279,65 L268,66 L254,75 L241,90 L241,99 L248,105 L258,108 L281,110 L278,125 L266,145 L255,160 L246,167 L234,164 L221,155 L211,145 L203,132 L217,116 L226,91 L228,79 L226,60 L217,52 L206,55 L195,72 L187,97 L187,122 L179,123 L173,120 L168,123 L164,122 L165,123 L160,127 L160,129 L173,135 L191,136 L200,152 L215,167 L228,175 L242,180 L254,180 L266,169 L290,130 L294,111 L303,112 L307,116 L310,126 L311,139 L307,151 L301,159 L298,167 L279,184 L281,191 L286,194 L298,194 L304,192 L337,172 L356,155 L370,132 L381,97 L393,125 L407,140 L415,145 L424,148 L437,147 L435,138Z"/></svg></span></header>
     <header class="heading"><h1>اتفاقية إلكترونية موحدة</h1><h2>{safe((snapshot or {}).get('title',c.title))} — مستخرج من سجل منصة وصلة</h2></header>
@@ -1416,14 +1427,19 @@ def admin_contracts(user:User=Depends(require_role('admin')),db:Session=Depends(
 
 @app.post('/api/admin/contracts')
 def create_contract(data:ContractIn,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
-    if data.contract_type not in ('platform_merchant','platform_affiliate','merchant_affiliate'):
+    if data.contract_type not in ('platform_merchant','platform_affiliate','merchant_affiliate','multi_party'):
         raise HTTPException(400,'نوع الاتفاقية غير صحيح')
     if data.contract_type in ('platform_merchant','merchant_affiliate'):
         if not data.merchant_id or not db.get(User,data.merchant_id) or db.get(User,data.merchant_id).role!='merchant': raise HTTPException(400,'اختر حساب تاجر صحيح')
     if data.contract_type in ('platform_affiliate','merchant_affiliate'):
         if not data.affiliate_id or not db.get(User,data.affiliate_id) or db.get(User,data.affiliate_id).role!='affiliate': raise HTTPException(400,'اختر حساب مسوق صحيح')
+    if data.contract_type=='multi_party':
+        ids=list(dict.fromkeys(data.participant_ids or []))
+        if len(ids)<2: raise HTTPException(400,'يجب تحديد طرفين على الأقل للاتفاقية متعددة الأطراف')
+        if any(not db.get(User,uid) or db.get(User,uid).role=='admin' for uid in ids): raise HTTPException(400,'تأكد من اختيار حسابات أطراف صحيحة')
+        data.participant_ids=ids
     if data.commission_scope not in ('contract','all_products','product'): raise HTTPException(400,'نطاق العمولة غير صحيح')
-    c=Contract(contract_type=data.contract_type,title=data.title.strip(),body=ensure_contract_ack(data.body),merchant_id=data.merchant_id,affiliate_id=data.affiliate_id,commission_rate=data.commission_rate,penalty_terms=data.penalty_terms,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),starts_at=data.starts_at,ends_at=data.ends_at,legal_entity_name=data.legal_entity_name,commission_scope=data.commission_scope,penalty_type=data.penalty_type,penalty_amount=data.penalty_amount,penalty_percent=data.penalty_percent,termination_terms=data.termination_terms,platform_signer_name='WESLA | المنصة')
+    c=Contract(contract_type=data.contract_type,title=data.title.strip(),body=ensure_contract_ack(data.body),merchant_id=data.merchant_id,affiliate_id=data.affiliate_id,participant_ids=data.participant_ids,commission_rate=data.commission_rate,penalty_terms=data.penalty_terms,status='draft',contract_number='WS-'+datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+secrets.token_hex(3).upper(),starts_at=data.starts_at,ends_at=data.ends_at,legal_entity_name=data.legal_entity_name,commission_scope=data.commission_scope,penalty_type=data.penalty_type,penalty_amount=data.penalty_amount,penalty_percent=data.penalty_percent,termination_terms=data.termination_terms,platform_signer_name='WESLA | المنصة')
     db.add(c); db.flush(); contract_event(db,c,user,'created',{'number':c.contract_number})
     db.commit(); db.refresh(c); return contract_out(c,db)
 
@@ -1443,7 +1459,7 @@ def reissue_unnumbered_contract(contract_id:int,user:User=Depends(require_role('
         raise HTTPException(409,'لا يمكن إعادة إصدار نسخة سبق إقفالها إلا بعد مراجعة حالتها أولًا')
     revised=Contract(
         contract_type=c.contract_type,title=c.title,body=c.body,merchant_id=c.merchant_id,affiliate_id=c.affiliate_id,
-        commission_rate=c.commission_rate,penalty_terms=c.penalty_terms,status='draft',contract_number=new_number,
+        commission_rate=c.commission_rate,penalty_terms=c.penalty_terms,participant_ids=list(c.participant_ids or []),status='draft',contract_number=new_number,
         starts_at=c.starts_at,ends_at=c.ends_at,version=(c.version or 1)+1,
         platform_signer_name=c.platform_signer_name,legal_entity_name=c.legal_entity_name,
         commission_scope=c.commission_scope,penalty_type=c.penalty_type,penalty_amount=c.penalty_amount,
