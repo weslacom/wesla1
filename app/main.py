@@ -396,10 +396,12 @@ def register(data:RegisterIn,db:Session=Depends(get_db)):
         referrer=db.execute(text("select user_id from wesla_referral_codes where upper(code)=:code"),{'code':referral_code}).first()
         if not referrer: raise HTTPException(400,'كود الدعوة غير صحيح')
     u=User(name=data.name.strip(),email=email,password_hash=hash_password(data.password),role='customer')
-    db.add(u); db.commit(); db.refresh(u)
+    db.add(u)
+    db.flush()
     if referrer and int(referrer.user_id)!=u.id:
         db.execute(text("insert into wesla_referrals(referrer_user_id,referred_user_id,referral_code,status) values (:referrer,:referred,:code,'registered') on conflict(referred_user_id) do nothing"),{'referrer':int(referrer.user_id),'referred':u.id,'code':referral_code})
-        db.commit()
+    db.commit()
+    db.refresh(u)
     return {'message':'تم إنشاء الحساب. يمكنك التقديم كتاجر أو مسوق.','user':public_user(u)}
 @app.post('/api/login')
 def login(data:LoginIn,response:Response,db:Session=Depends(get_db)):
@@ -894,6 +896,38 @@ def update_order(order_number:str,status:str,user:User=Depends(require_role('mer
                       where user_id=:uid
                     """),{'uid':o.customer_user_id,'points':earned_points})
                     notify_user(db,o.customer_user_id,'نقاط مكافأة جديدة',f'حصلت على {earned_points} نقطة بعد تسليم الطلب {o.order_number}.')
+            # Referral rewards are posted automatically after the invited customer
+            # completes their first delivered order. The event key makes this idempotent.
+            if wesla_feature_enabled(db, 'referrals', False):
+                referral=db.execute(text("""
+                  select id,referrer_user_id,status from wesla_referrals
+                  where referred_user_id=:uid and status='registered'
+                  for update
+                """),{'uid':o.customer_user_id}).mappings().first()
+                if referral:
+                    referral_cfg=db.execute(text("select config,is_enabled from wesla_feature_settings where feature_key='referrals'")).mappings().first()
+                    referral_points=int(((referral_cfg or {}).get('config') or {}).get('referral_reward_points',0))
+                    if referral_cfg and referral_cfg['is_enabled'] and referral_points>0:
+                        referrer_id=int(referral['referrer_user_id'])
+                        db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"),{'uid':referrer_id})
+                        referral_event='referral:'+str(referral['id'])
+                        awarded=db.execute(text("""
+                          insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+                          values (:uid,:points,'posted',:event,'referral',:rid,'مكافأة دعوة صديق بعد إتمام أول طلب')
+                          on conflict(event_key) do nothing returning id
+                        """),{'uid':referrer_id,'points':referral_points,'event':referral_event,'rid':referral['id']}).first()
+                        if awarded:
+                            db.execute(text("""
+                              update wesla_reward_accounts
+                              set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,
+                                  tier=case when lifetime_earned+:points>=3000 then 'platinum'
+                                            when lifetime_earned+:points>=1500 then 'gold'
+                                            when lifetime_earned+:points>=500 then 'silver' else 'basic' end,
+                                  updated_at=now()
+                              where user_id=:uid
+                            """),{'points':referral_points,'uid':referrer_id})
+                            db.execute(text("update wesla_referrals set status='qualified',reward_points=:points,qualified_at=now() where id=:id"),{'points':referral_points,'id':referral['id']})
+                            notify_user(db,referrer_id,'تم احتساب مكافأة دعوة صديق',f'حصلت على {referral_points} نقطة بعد إتمام أول طلب للعميل المدعو.')
         for admin_user in db.scalars(select(User).where(User.role=='admin',User.status=='active')).all():
             notify_user(db,admin_user.id,'عمولة منصة جديدة',f'اكتمل بيع الطلب {o.order_number}. عمولة وصلة {o.platform_commission} جنيه'+(f'، وعمولة المسوق {o.affiliate_commission} جنيه.' if o.affiliate_id else '.'),'/control')
     db.commit(); return {'message':'تم تحديث حالة الطلب. تم تحديث العمولات والإشعارات فورًا.'}
@@ -1966,8 +2000,8 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
 # Only systems with implemented user-facing flows and real backend routes can be enabled.
 # The remaining switches stay visible in admin as "in development" and are not exposed to users.
 FEATURE_READY = {
-    'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
-    'achievements': True, 'academy': True,
+    'referrals': True, 'rewards': True, 'trends': False, 'challenges': False,
+    'achievements': False, 'academy': False,
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
     'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
     'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
