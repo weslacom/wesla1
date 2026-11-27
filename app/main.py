@@ -399,7 +399,37 @@ def register(data:RegisterIn,db:Session=Depends(get_db)):
     db.add(u)
     db.flush()
     if referrer and int(referrer.user_id)!=u.id:
-        db.execute(text("insert into wesla_referrals(referrer_user_id,referred_user_id,referral_code,status) values (:referrer,:referred,:code,'registered') on conflict(referred_user_id) do nothing"),{'referrer':int(referrer.user_id),'referred':u.id,'code':referral_code})
+        referral=db.execute(text("""
+          insert into wesla_referrals(referrer_user_id,referred_user_id,referral_code,status)
+          values (:referrer,:referred,:code,'registered')
+          on conflict(referred_user_id) do nothing returning id,referrer_user_id
+        """),{'referrer':int(referrer.user_id),'referred':u.id,'code':referral_code}).mappings().first()
+        # Grant the configured referral reward as soon as the invited friend
+        # successfully creates a new account. Unique event_key prevents duplicates.
+        if referral:
+            cfg=db.execute(text("select config,is_enabled from wesla_feature_settings where feature_key='referrals'")).mappings().first()
+            points=int(((cfg or {}).get('config') or {}).get('referral_reward_points',0))
+            if cfg and cfg['is_enabled'] and points>0:
+                referrer_id=int(referral['referrer_user_id'])
+                db.execute(text("insert into wesla_reward_accounts(user_id) values (:uid) on conflict(user_id) do nothing"),{'uid':referrer_id})
+                event_key='referral:'+str(referral['id'])
+                awarded=db.execute(text("""
+                  insert into wesla_reward_ledger(user_id,delta,status,event_key,source_type,source_id,description)
+                  values (:uid,:points,'posted',:event,'referral',:rid,'مكافأة دعوة صديق بعد إنشاء حسابه')
+                  on conflict(event_key) do nothing returning id
+                """),{'uid':referrer_id,'points':points,'event':event_key,'rid':referral['id']}).first()
+                if awarded:
+                    db.execute(text("""
+                      update wesla_reward_accounts
+                      set points_available=points_available+:points,lifetime_earned=lifetime_earned+:points,
+                          tier=case when lifetime_earned+:points>=3000 then 'platinum'
+                                    when lifetime_earned+:points>=1500 then 'gold'
+                                    when lifetime_earned+:points>=500 then 'silver' else 'basic' end,
+                          updated_at=now()
+                      where user_id=:uid
+                    """),{'points':points,'uid':referrer_id})
+                    db.execute(text("update wesla_referrals set status='qualified',reward_points=:points,qualified_at=now() where id=:id"),{'points':points,'id':referral['id']})
+                    notify_user(db,referrer_id,'تم احتساب نقاط دعوة صديق',f'حصلت على {points} نقطة بعد إنشاء صديقك حسابه على وصلة.')
     db.commit()
     db.refresh(u)
     return {'message':'تم إنشاء الحساب. يمكنك التقديم كتاجر أو مسوق.','user':public_user(u)}
