@@ -2080,7 +2080,7 @@ def list_admin_activity_log(limit: int = Query(default=200, ge=1, le=500), user:
 @app.get('/api/admin/advanced/settings')
 def admin_advanced_settings(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(text("select feature_key,is_enabled,audience,config,updated_at from wesla_feature_settings order by feature_key")).mappings().all()
-    return [dict(x) for x in rows]
+    return [{**dict(x), 'is_ready': bool(FEATURE_READY.get(x['feature_key'], False)), 'approval_status': ('approved' if x['is_enabled'] else ('ready_for_approval' if FEATURE_READY.get(x['feature_key'], False) else 'in_development'))} for x in rows]
 
 @app.patch('/api/admin/advanced/settings/{feature_key}')
 def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
