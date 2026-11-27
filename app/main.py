@@ -2014,15 +2014,28 @@ FEATURE_READY = {
 FEATURE_KEYS = set(FEATURE_READY)
 
 def wesla_feature_enabled(db: Session, feature_key: str, default: bool = True) -> bool:
+    # A database toggle can never expose a module before its implementation is ready.
+    if not FEATURE_READY.get(feature_key, False):
+        return False
     value = db.execute(text("select is_enabled from wesla_feature_settings where feature_key=:key"),
                        {'key': feature_key}).scalar()
-    return default if value is None else bool(value)
+    return bool(default if value is None else value)
 
 @app.get('/api/advanced/features')
-def advanced_feature_status(db: Session = Depends(get_db)):
-    rows = db.execute(text("select feature_key,is_enabled from wesla_feature_settings")).mappings().all()
-    stored = {r['feature_key']: bool(r['is_enabled']) for r in rows}
-    return {key: bool(FEATURE_READY[key] and stored.get(key, False)) for key in FEATURE_KEYS}
+def advanced_feature_status(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.execute(text("select feature_key,is_enabled,audience from wesla_feature_settings")).mappings().all()
+    stored = {r['feature_key']: r for r in rows}
+    result = {}
+    for key in FEATURE_KEYS:
+        setting = stored.get(key)
+        audience = setting.get('audience') if setting else []
+        if isinstance(audience, str):
+            try: audience = json.loads(audience)
+            except Exception: audience = []
+        audience = audience or []
+        role_allowed = 'all' in audience or user.role in audience
+        result[key] = bool(FEATURE_READY[key] and setting and setting['is_enabled'] and role_allowed)
+    return result
 
 @app.get('/api/admin/activity-log')
 def list_admin_activity_log(limit: int = Query(default=200, ge=1, le=500), user: User = Depends(require_role('admin')), db: Session = Depends(get_db)):
