@@ -856,6 +856,14 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
         discount=(subtotal*Decimal(coupon.discount_value)/Decimal(100)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP) if coupon.discount_type=='percent' else Decimal(coupon.discount_value)
         if coupon.max_discount is not None: discount=min(discount,Decimal(coupon.max_discount))
         discount=min(discount,subtotal)
+    if wesla_feature_enabled(db,'seasonal_campaigns',False):
+        campaign=db.execute(text("""select discount_percent from wesla_seasonal_campaigns
+          where is_active=true and starts_at<=now() and ends_at>now() and audience in ('all','customer')
+          and (product_ids='[]'::jsonb or product_ids @> cast(:pid as jsonb))
+          order by discount_percent desc limit 1"""),{'pid':json.dumps(p.id)}).scalar()
+        if campaign:
+            campaign_discount=(subtotal*Decimal(str(campaign))/Decimal(100)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+            discount=max(discount,campaign_discount)
     total=(subtotal-discount).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
     ac=(total*Decimal(p.affiliate_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if affiliate_id else Decimal('0.00')
     pc=(total*Decimal(p.platform_rate)/Decimal(100)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
@@ -3268,6 +3276,53 @@ def wesla_ai_assist(data:dict,user:User=Depends(current_user),db:Session=Depends
         db.rollback();raise HTTPException(504,'انتهت مهلة الاتصال بمزود الذكاء الاصطناعي')
     except (KeyError,ValueError,TypeError):
         db.rollback();raise HTTPException(502,'استجابة مزود الذكاء الاصطناعي غير مكتملة')
+
+
+
+@app.post('/api/advanced/bundles/{bundle_id}/orders')
+def order_bundle(bundle_id:int,data:dict,request:Request,db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'bundles_deals',False): raise HTTPException(404,'الباقات غير متاحة')
+    bundle=db.execute(text("""select * from wesla_product_bundles where id=:id and is_active=true
+      and starts_at<=now() and ends_at>now() for update"""),{'id':bundle_id}).mappings().first()
+    if not bundle: raise HTTPException(404,'الباقة غير متاحة حاليًا')
+    ids=bundle['product_ids'] if isinstance(bundle['product_ids'],list) else json.loads(bundle['product_ids'])
+    products=db.scalars(select(Product).where(Product.id.in_(ids),Product.status=='active').with_for_update()).all()
+    if len(products)!=len(ids) or any(p.stock<1 for p in products): raise HTTPException(409,'أحد منتجات الباقة غير متاح أو نفد مخزونه')
+    name=str(data.get('customer_name','')).strip();phone=str(data.get('customer_phone','')).strip();address=str(data.get('address','')).strip()
+    if len(name)<2 or len(phone)<7 or len(address)<5: raise HTTPException(400,'أدخل الاسم ورقم الهاتف والعنوان بالتفصيل')
+    customer_user_id=None
+    token=request.cookies.get('wesla_session')
+    if token:
+        active=db.scalar(select(AuthSession).where(AuthSession.token_hash==hashlib.sha256(token.encode()).hexdigest()))
+        if active:
+            customer=db.get(User,active.user_id)
+            if customer and customer.status=='active' and customer.role=='customer': customer_user_id=customer.id
+    code='WB'+secrets.token_hex(5).upper()
+    purchase=db.execute(text("""insert into wesla_bundle_purchases(purchase_code,bundle_id,customer_user_id,customer_name,customer_phone,address,total)
+      values (:code,:bid,:uid,:name,:phone,:address,:total) returning id"""),
+      {'code':code,'bid':bundle_id,'uid':customer_user_id,'name':name[:120],'phone':phone[:40],'address':address[:2000],'total':bundle['bundle_price']}).first()
+    db.flush()
+    regular=sum((Decimal(str(p.price)) for p in products),Decimal('0'))
+    allocated=Decimal('0.00'); order_numbers=[]
+    for idx,p in enumerate(products):
+        unit=(Decimal(str(bundle['bundle_price']))-allocated).quantize(Decimal('0.01')) if idx==len(products)-1 else (Decimal(str(bundle['bundle_price']))*Decimal(str(p.price))/regular).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+        allocated+=unit
+        platform_commission=(unit*Decimal(str(p.platform_rate))/Decimal(100)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+        order=Order(order_number='WS'+secrets.token_hex(5).upper(),customer_name=name[:120],customer_phone=phone[:40],address=address[:2000],
+          product_id=p.id,merchant_id=p.merchant_id,affiliate_id=None,customer_user_id=customer_user_id,quantity=1,
+          unit_price=unit,total=unit,affiliate_rate_snapshot=p.affiliate_rate,platform_rate_snapshot=p.platform_rate,
+          affiliate_commission=Decimal('0.00'),platform_commission=platform_commission)
+        p.stock-=1
+        if p.stock<=0:p.status='sold_out'
+        db.add(order);db.flush()
+        if wesla_feature_enabled(db,'advanced_order_tracking',False):
+            db.execute(text("insert into wesla_order_status_history(order_id,status,actor_role,note) values (:oid,:status,'system','تم استلام طلب الباقة')"),{'oid':order.id,'status':order.status})
+        db.execute(text("insert into wesla_bundle_purchase_items(purchase_id,order_id) values (:pid,:oid)"),{'pid':purchase.id,'oid':order.id})
+        notify_user(db,p.merchant_id,'طلب جديد ضمن باقة',f'طلب الباقة {code} — المنتج {p.title}')
+        notify_wesla_product_alerts(db,p,None)
+        order_numbers.append(order.order_number)
+    db.commit()
+    return {'ok':True,'purchase_code':code,'order_numbers':order_numbers,'total':float(bundle['bundle_price']),'message':'تم تسجيل طلب الباقة، وسيتواصل التجار لتأكيد المنتجات'}
 
 
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
