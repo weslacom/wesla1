@@ -3,6 +3,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+# Supabase session pooler (5432) has a small client cap; Vercel serverless
+# instances must use the transaction pooler (6543) to avoid exhausting it.
+if DATABASE_URL and os.getenv("VERCEL") == "1" and ".pooler.supabase.com" in DATABASE_URL and ":5432" in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace(":5432", ":6543", 1)
 if not DATABASE_URL:
     if os.getenv("VERCEL") == "1":
         raise RuntimeError("DATABASE_URL must be configured in Vercel before Wesla can start.")
