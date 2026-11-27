@@ -2146,7 +2146,7 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
 FEATURE_READY = {
     'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
     'achievements': True, 'academy': True,
-    'wesla_ai': False, 'recommendations': True, 'seasonal_campaigns': True,
+    'wesla_ai': True, 'recommendations': True, 'seasonal_campaigns': True,
     'fraud_detection': True, 'admin_activity_log': True, 'smart_marketer_matching': True,
     'inventory_order_alerts': True, 'marketer_competitions': True, 'verified_reviews': True,
     'advanced_order_tracking': True, 'premium_subscriptions': True, 'ads_center': True,
@@ -2155,9 +2155,14 @@ FEATURE_READY = {
 }
 FEATURE_KEYS = set(FEATURE_READY)
 
+def feature_is_ready(feature_key:str)->bool:
+    if feature_key=='wesla_ai':
+        return bool(os.getenv('OPENAI_API_KEY'))
+    return bool(FEATURE_READY.get(feature_key,False))
+
 def wesla_feature_enabled(db: Session, feature_key: str, default: bool = True) -> bool:
     # A database toggle can never expose a module before its implementation is ready.
-    if not FEATURE_READY.get(feature_key, False):
+    if not feature_is_ready(feature_key):
         return False
     value = db.execute(text("select is_enabled from wesla_feature_settings where feature_key=:key"),
                        {'key': feature_key}).scalar()
@@ -2176,7 +2181,7 @@ def advanced_feature_status(user: User = Depends(current_user), db: Session = De
             except Exception: audience = []
         audience = audience or []
         role_allowed = 'all' in audience or user.role in audience
-        result[key] = bool(FEATURE_READY[key] and setting and setting['is_enabled'] and role_allowed)
+        result[key] = bool(feature_is_ready(key) and setting and setting['is_enabled'] and role_allowed)
     return result
 
 @app.get('/api/admin/activity-log')
@@ -2192,7 +2197,7 @@ def list_admin_activity_log(limit: int = Query(default=200, ge=1, le=500), user:
 @app.get('/api/admin/advanced/settings')
 def admin_advanced_settings(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(text("select feature_key,is_enabled,audience,config,updated_at from wesla_feature_settings order by feature_key")).mappings().all()
-    return [{**dict(x), 'is_ready': bool(FEATURE_READY.get(x['feature_key'], False)), 'approval_status': ('approved' if x['is_enabled'] else ('ready_for_approval' if FEATURE_READY.get(x['feature_key'], False) else 'in_development'))} for x in rows]
+    return [{**dict(x), 'is_ready': feature_is_ready(x['feature_key']), 'approval_status': ('approved' if x['is_enabled'] else ('ready_for_approval' if feature_is_ready(x['feature_key']) else 'in_development'))} for x in rows]
 
 @app.patch('/api/admin/advanced/settings/{feature_key}')
 def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
@@ -2200,7 +2205,7 @@ def update_admin_advanced_setting(feature_key:str,data:dict,user:User=Depends(re
     if feature_key not in allowed: raise HTTPException(404,'الميزة غير معروفة')
     enabled=data.get('is_enabled')
     if not isinstance(enabled,bool): raise HTTPException(400,'حالة التفعيل غير صحيحة')
-    if enabled and not FEATURE_READY.get(feature_key, False): raise HTTPException(409,'هذا النظام ما زال قيد الربط والاختبار، ولا يمكن تفعيله قبل اكتماله')
+    if enabled and not feature_is_ready(feature_key): raise HTTPException(409,'هذا النظام ما زال قيد الربط والاختبار، ولا يمكن تفعيله قبل اكتماله')
     audience=data.get('audience',[])
     if not isinstance(audience,list) or any(x not in ('all','customer','merchant','affiliate','visitor','admin') for x in audience): raise HTTPException(400,'الجمهور المحدد غير صحيح')
     config=data.get('config',{})
