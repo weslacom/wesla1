@@ -2951,6 +2951,112 @@ def create_marketing_asset(data:dict,user:User=Depends(require_role('admin')),db
     db.commit(); return {'ok':True,'id':row.id}
 
 
+
+@app.post('/api/merchant/products/bulk-import')
+def bulk_import_products(data:dict,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'bulk_product_import',False): raise HTTPException(404,'الاستيراد الجماعي غير متاح')
+    rows=data.get('rows')
+    if not isinstance(rows,list) or not rows or len(rows)>100: raise HTTPException(400,'أرسل من 1 إلى 100 منتج في الدفعة الواحدة')
+    errors=[]; clean=[]
+    allowed_types=('mens_clothing','womens_clothing','kids_clothing','mens_shoes','womens_shoes','kids_shoes','other')
+    for i,row in enumerate(rows,1):
+        if not isinstance(row,dict): errors.append({'row':i,'error':'صيغة الصف غير صحيحة'});continue
+        title=str(row.get('title','')).strip(); kind=str(row.get('product_type','other'))
+        try: price=Decimal(str(row.get('price'))); stock=int(row.get('stock',0)); rate=Decimal(str(row.get('affiliate_rate',10)))
+        except Exception: errors.append({'row':i,'error':'السعر أو المخزون أو العمولة غير صحيح'});continue
+        if len(title)<3 or price<=0 or stock<0 or rate<0 or rate>80 or kind not in allowed_types:
+            errors.append({'row':i,'error':'تحقق من الاسم والسعر والمخزون ونوع المنتج والعمولة'});continue
+        clean.append({'title':title[:180],'description':str(row.get('description',''))[:5000],'price':price,'stock':stock,'rate':rate,'kind':kind})
+    job=db.execute(text("insert into wesla_bulk_import_jobs(merchant_id,status,total_rows,errors) values (:uid,:status,:total,cast(:errors as jsonb)) returning id"),
+      {'uid':user.id,'status':'rejected' if errors else 'importing','total':len(rows),'errors':json.dumps(errors)}).first()
+    if errors:
+        db.commit(); return {'ok':False,'job_id':job.id,'imported_rows':0,'errors':errors}
+    for row in clean:
+        db.add(Product(merchant_id=user.id,title=row['title'],description=row['description'],price=row['price'],stock=row['stock'],
+          affiliate_rate=row['rate'],platform_rate=Decimal(str(os.getenv('PLATFORM_RATE_DEFAULT','5'))),product_type=row['kind'],status='active' if row['stock'] else 'sold_out'))
+    db.flush()
+    db.execute(text("update wesla_bulk_import_jobs set status='completed',imported_rows=:n where id=:id"),{'n':len(clean),'id':job.id})
+    db.commit(); return {'ok':True,'job_id':job.id,'imported_rows':len(clean),'errors':[]}
+
+@app.get('/api/advanced/recommendations')
+def advanced_recommendations(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'recommendations',False): raise HTTPException(404,'التوصيات الذكية غير متاحة')
+    rows=db.execute(text("""select p.id,p.title,p.price,p.stock,p.product_type,
+      count(distinct o.id) filter(where o.status in ('confirmed','shipped','delivered'))::int as orders,
+      count(distinct f.id)::int as favorites
+      from products p left join orders o on o.product_id=p.id
+      left join favorites f on f.product_id=p.id
+      where p.status='active' and p.stock>0 group by p.id
+      order by orders desc,favorites desc,p.created_at desc limit 30""")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/advanced/marketer-matches/{product_id}')
+def marketer_matches(product_id:int,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'smart_marketer_matching',False): raise HTTPException(404,'مطابقة المسوقين غير متاحة')
+    p=db.get(Product,product_id)
+    if not p or user.role!='admin' and p.merchant_id!=user.id: raise HTTPException(404,'المنتج غير موجود')
+    rows=db.execute(text("""select u.id,u.name,count(distinct o.id)::int as delivered_orders,
+      coalesce(sum(o.affiliate_commission),0)::numeric(12,2) as earned,
+      count(distinct l.id)::int as active_links
+      from users u left join orders o on o.affiliate_id=u.id and o.status='delivered'
+      left join links l on l.affiliate_id=u.id
+      where u.role='affiliate' and u.status='active'
+      group by u.id,u.name order by delivered_orders desc,active_links desc limit 30""")).mappings().all()
+    return [{'user_id':x['id'],'name':x['name'],'delivered_orders':x['delivered_orders'],'earned':float(x['earned']),'active_links':x['active_links'],
+      'match_score':min(100,20+int(x['delivered_orders'])*5+int(x['active_links'])*2)} for x in rows]
+
+@app.get('/api/advanced/seasonal-campaigns')
+def live_seasonal_campaigns(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'seasonal_campaigns',False): raise HTTPException(404,'الحملات الموسمية غير متاحة')
+    rows=db.execute(text("""select id,title,description,starts_at,ends_at,discount_percent,product_ids
+      from wesla_seasonal_campaigns where is_active=true and starts_at<=now() and ends_at>now()
+      and audience in ('all',:role) order by ends_at"""),{'role':user.role}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/seasonal-campaigns')
+def admin_seasonal_campaigns(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    return [dict(x) for x in db.execute(text("select * from wesla_seasonal_campaigns order by created_at desc")).mappings().all()]
+
+@app.post('/api/admin/advanced/seasonal-campaigns')
+def create_seasonal_campaign(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    title=str(data.get('title','')).strip(); audience=str(data.get('audience','all'))
+    try: starts=datetime.fromisoformat(str(data['starts_at']).replace('Z','+00:00')); ends=datetime.fromisoformat(str(data['ends_at']).replace('Z','+00:00')); discount=Decimal(str(data.get('discount_percent',0)))
+    except Exception: raise HTTPException(400,'بيانات الحملة غير صحيحة')
+    ids=data.get('product_ids',[])
+    if len(title)<3 or ends<=starts or discount<0 or discount>80 or not isinstance(ids,list) or audience not in ('all','customer','merchant','affiliate'): raise HTTPException(400,'راجع العنوان والتواريخ والخصم والمنتجات')
+    row=db.execute(text("""insert into wesla_seasonal_campaigns(title,description,starts_at,ends_at,discount_percent,product_ids,audience,is_active)
+      values (:title,:desc,:starts,:ends,:discount,cast(:ids as jsonb),:audience,:active) returning id"""),
+      {'title':title[:180],'desc':str(data.get('description',''))[:5000],'starts':starts,'ends':ends,'discount':discount,'ids':json.dumps(ids),'audience':audience,'active':bool(data.get('is_active',False))}).first()
+    db.commit();return {'ok':True,'id':row.id}
+
+@app.get('/api/advanced/bundles')
+def live_bundles(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'bundles_deals',False): raise HTTPException(404,'الباقات والعروض غير متاحة')
+    rows=db.execute(text("""select b.id,b.title,b.description,b.product_ids,b.bundle_price,b.starts_at,b.ends_at,u.name as merchant
+      from wesla_product_bundles b join users u on u.id=b.merchant_id
+      where b.is_active=true and b.starts_at<=now() and b.ends_at>now() order by b.ends_at limit 100""")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/merchant/bundles')
+def create_bundle(data:dict,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'bundles_deals',False): raise HTTPException(404,'الباقات والعروض غير متاحة')
+    ids=data.get('product_ids')
+    if not isinstance(ids,list) or len(ids)<2 or len(ids)>10: raise HTTPException(400,'الباقة يجب أن تحتوي من منتجين إلى 10 منتجات')
+    ids=list(dict.fromkeys(int(x) for x in ids))
+    products=db.scalars(select(Product).where(Product.id.in_(ids),Product.merchant_id==user.id,Product.status=='active')).all()
+    if len(products)!=len(ids): raise HTTPException(400,'كل منتجات الباقة يجب أن تكون منشورة وتتبع حسابك')
+    try: price=Decimal(str(data.get('bundle_price'))); ends=datetime.fromisoformat(str(data['ends_at']).replace('Z','+00:00'))
+    except Exception: raise HTTPException(400,'السعر أو تاريخ الانتهاء غير صحيح')
+    total=sum((Decimal(str(p.price)) for p in products),Decimal('0'))
+    if price<=0 or price>=total: raise HTTPException(400,'سعر الباقة يجب أن يكون أقل من مجموع أسعار المنتجات')
+    title=str(data.get('title','')).strip()
+    if len(title)<3: raise HTTPException(400,'اسم الباقة مطلوب')
+    row=db.execute(text("""insert into wesla_product_bundles(merchant_id,title,description,product_ids,bundle_price,ends_at,is_active)
+      values (:uid,:title,:desc,cast(:ids as jsonb),:price,:ends,:active) returning id"""),
+      {'uid':user.id,'title':title[:180],'desc':str(data.get('description',''))[:3000],'ids':json.dumps(ids),'price':price,'ends':ends,'active':bool(data.get('is_active',False))}).first()
+    db.commit();return {'ok':True,'bundle_id':row.id,'regular_total':float(total),'bundle_price':float(price)}
+
+
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
 # and custom pages work without requiring a special /chat suffix.
 @app.get('/{full_path:path}')
