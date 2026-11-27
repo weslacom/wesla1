@@ -1986,15 +1986,70 @@ def advanced_achievements_me(user:User=Depends(current_user),db:Session=Depends(
     return [dict(x) for x in rows]
 
 @app.get('/api/advanced/academy')
-def advanced_academy(audience:str='all',db:Session=Depends(get_db)):
+def advanced_academy(audience:str='all',user:User=Depends(current_user),db:Session=Depends(get_db)):
     if not wesla_feature_enabled(db, 'academy', False): raise HTTPException(404, 'هذا النظام متوقف مؤقتًا من إدارة وصلة')
-    if audience not in ('all','customer','merchant','affiliate'): audience='all'
+    allowed=('customer','merchant','affiliate')
+    effective=user.role if user.role in allowed else 'all'
+    if user.role!='admin' and audience not in ('all',effective): raise HTTPException(403,'هذا المحتوى غير مخصص لحسابك')
+    if user.role=='admin' and audience not in ('all',*allowed): audience='all'
+    if user.role!='admin': audience=effective
     rows=db.execute(text("""
       select id,title,content_type,audience,body,media_url,created_at
       from wesla_academy_content where is_published=true and audience in ('all',:audience)
       order by created_at desc limit 100
     """),{'audience':audience}).mappings().all()
     return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/academy')
+def admin_academy_list(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("select * from wesla_academy_content order by created_at desc,id desc limit 300")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/advanced/academy')
+def admin_academy_create(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    title=str(data.get('title','')).strip()
+    body=str(data.get('body','')).strip()
+    kind=str(data.get('content_type','article')).strip().lower()
+    audience=str(data.get('audience','all')).strip().lower()
+    media=str(data.get('media_url','')).strip()
+    if len(title)<3 or not body or kind not in ('article','video','file','lesson') or audience not in ('all','customer','merchant','affiliate'):
+        raise HTTPException(400,'بيانات المحتوى التعليمي غير مكتملة أو غير صحيحة')
+    if media and not (media.startswith('https://') or media.startswith('/')): raise HTTPException(400,'رابط الوسائط يجب أن يكون HTTPS أو مسارًا داخليًا')
+    row=db.execute(text("""insert into wesla_academy_content(title,content_type,audience,body,media_url,is_published)
+      values (:title,:kind,:audience,:body,:media,:published) returning id"""),
+      {'title':title[:180],'kind':kind,'audience':audience,'body':body[:30000],'media':media[:2000],'published':bool(data.get('is_published',False))}).first()
+    db.commit()
+    return {'ok':True,'id':row.id}
+
+@app.patch('/api/admin/advanced/academy/{content_id}')
+def admin_academy_update(content_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    allowed={'title':'title','content_type':'content_type','audience':'audience','body':'body','media_url':'media_url','is_published':'is_published'}
+    sets=[];params={'id':content_id}
+    for key,col in allowed.items():
+        if key not in data: continue
+        value=data[key]
+        if key=='title':
+            value=str(value).strip()
+            if len(value)<3: raise HTTPException(400,'العنوان قصير')
+            value=value[:180]
+        elif key=='body':
+            value=str(value).strip()
+            if not value: raise HTTPException(400,'محتوى الدرس مطلوب')
+            value=value[:30000]
+        elif key=='content_type' and value not in ('article','video','file','lesson'): raise HTTPException(400,'نوع المحتوى غير صحيح')
+        elif key=='audience' and value not in ('all','customer','merchant','affiliate'): raise HTTPException(400,'الجمهور غير صحيح')
+        elif key=='media_url':
+            value=str(value).strip()
+            if value and not (value.startswith('https://') or value.startswith('/')): raise HTTPException(400,'رابط الوسائط غير صالح')
+            value=value[:2000]
+        elif key=='is_published': value=bool(value)
+        sets.append(f"{col}=:{key}");params[key]=value
+    if not sets: raise HTTPException(400,'لا توجد تعديلات')
+    sets.append('updated_at=now()')
+    row=db.execute(text("update wesla_academy_content set "+','.join(sets)+" where id=:id returning id"),params).first()
+    if not row: raise HTTPException(404,'المحتوى غير موجود')
+    db.commit()
+    return {'ok':True}
 
 @app.post('/api/admin/advanced/rewards/adjust')
 def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
