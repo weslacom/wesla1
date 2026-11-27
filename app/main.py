@@ -1,4 +1,4 @@
-import os, secrets, hashlib, hmac, json, base64, binascii, asyncio, re, urllib.request, urllib.error
+import os, secrets, hashlib, hmac, json, base64, binascii, asyncio, re, csv, io, urllib.request, urllib.error
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, Query
@@ -2026,6 +2026,7 @@ def advanced_challenges(user:User=Depends(current_user),db:Session=Depends(get_d
 
 @app.post('/api/advanced/challenges/{challenge_id}/join')
 def advanced_join_challenge(challenge_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'challenges',False): raise HTTPException(404,'التحديات غير متاحة')
     challenge=db.execute(text("select id from wesla_challenges where id=:id and is_active=true and starts_at<=now() and ends_at>now()"),{'id':challenge_id}).first()
     if not challenge: raise HTTPException(404,'التحدي غير متاح حالياً')
     db.execute(text("insert into wesla_challenge_participations(challenge_id,user_id) values (:cid,:uid) on conflict(challenge_id,user_id) do nothing"),{'cid':challenge_id,'uid':user.id})
@@ -3061,6 +3062,9 @@ def create_marketing_asset(data:dict,user:User=Depends(require_role('admin')),db
 def bulk_import_products(data:dict,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
     if not wesla_feature_enabled(db,'bulk_product_import',False): raise HTTPException(404,'الاستيراد الجماعي غير متاح')
     rows=data.get('rows')
+    if rows is None and isinstance(data.get('csv_text'),str):
+        try: rows=list(csv.DictReader(io.StringIO(data['csv_text'])))
+        except Exception: raise HTTPException(400,'تعذر قراءة ملف CSV')
     if not isinstance(rows,list) or not rows or len(rows)>100: raise HTTPException(400,'أرسل من 1 إلى 100 منتج في الدفعة الواحدة')
     errors=[]; clean=[]
     allowed_types=('mens_clothing','womens_clothing','kids_clothing','mens_shoes','womens_shoes','kids_shoes','other')
