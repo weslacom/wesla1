@@ -2137,13 +2137,13 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
 # The remaining switches stay visible in admin as "in development" and are not exposed to users.
 FEATURE_READY = {
     'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
-    'achievements': True, 'academy': False,
-    'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
-    'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
-    'inventory_order_alerts': False, 'marketer_competitions': False, 'verified_reviews': False,
+    'achievements': True, 'academy': True,
+    'wesla_ai': False, 'recommendations': True, 'seasonal_campaigns': True,
+    'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': True,
+    'inventory_order_alerts': True, 'marketer_competitions': True, 'verified_reviews': True,
     'advanced_order_tracking': True, 'premium_subscriptions': False, 'ads_center': False,
-    'marketing_library': False, 'wallet_ledger': True, 'disputes_center': False,
-    'bulk_product_import': False, 'price_drop_alerts': False, 'bundles_deals': False
+    'marketing_library': True, 'wallet_ledger': True, 'disputes_center': True,
+    'bulk_product_import': True, 'price_drop_alerts': True, 'bundles_deals': True
 }
 FEATURE_KEYS = set(FEATURE_READY)
 
