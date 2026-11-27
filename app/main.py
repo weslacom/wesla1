@@ -2139,9 +2139,9 @@ FEATURE_READY = {
     'referrals': True, 'rewards': True, 'trends': True, 'challenges': True,
     'achievements': True, 'academy': True,
     'wesla_ai': False, 'recommendations': True, 'seasonal_campaigns': True,
-    'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': True,
+    'fraud_detection': True, 'admin_activity_log': True, 'smart_marketer_matching': True,
     'inventory_order_alerts': True, 'marketer_competitions': True, 'verified_reviews': True,
-    'advanced_order_tracking': True, 'premium_subscriptions': False, 'ads_center': False,
+    'advanced_order_tracking': True, 'premium_subscriptions': True, 'ads_center': True,
     'marketing_library': True, 'wallet_ledger': True, 'disputes_center': True,
     'bulk_product_import': True, 'price_drop_alerts': True, 'bundles_deals': True
 }
@@ -2996,22 +2996,26 @@ def admin_ads(user:User=Depends(require_role('admin')),db:Session=Depends(get_db
 def admin_ad_decision(ad_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     status=str(data.get('status',''))
     if status not in ('approved','rejected','paused','completed'): raise HTTPException(400,'حالة الإعلان غير صحيحة')
-    row=db.execute(text("update wesla_ads set status=:s where id=:id returning advertiser_user_id"),{'s':status,'id':ad_id}).first()
+    payment_verified=data.get('payment_verified')
+    row=db.execute(text("select advertiser_user_id,payment_verified from wesla_ads where id=:id for update"),{'id':ad_id}).mappings().first()
     if not row: raise HTTPException(404,'الإعلان غير موجود')
-    notify_user(db,row.advertiser_user_id,'تحديث حالة إعلانك',f'حالة الإعلان الآن: {status}')
-    db.commit(); return {'ok':True}
+    verified=row['payment_verified'] if payment_verified is None else bool(payment_verified)
+    if status=='approved' and not verified: raise HTTPException(409,'لا يمكن نشر إعلان قبل مراجعة إثبات الدفع')
+    db.execute(text("update wesla_ads set status=:s,payment_verified=:verified where id=:id"),{'s':status,'verified':verified,'id':ad_id})
+    notify_user(db,row['advertiser_user_id'],'تحديث حالة إعلانك',f'حالة الإعلان الآن: {status}')
+    db.commit(); return {'ok':True,'payment_verified':verified}
 
 @app.post('/api/advanced/ads')
 def submit_ad(data:dict,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
     if not wesla_feature_enabled(db,'ads_center',False): raise HTTPException(404,'مركز الإعلانات غير متاح')
     title=str(data.get('title','')).strip(); url=str(data.get('destination_url','')).strip()
-    creative=str(data.get('creative_url','')).strip()
+    creative=str(data.get('creative_url','')).strip(); reference=str(data.get('payment_reference','')).strip()
     try: budget=Decimal(str(data.get('budget')))
     except Exception: raise HTTPException(400,'الميزانية غير صحيحة')
-    if len(title)<3 or not url.startswith('https://') or budget<=0: raise HTTPException(400,'بيانات الإعلان غير صحيحة')
-    row=db.execute(text("""insert into wesla_ads(advertiser_user_id,title,destination_url,creative_url,budget)
-      values (:uid,:title,:url,:creative,:budget) returning id"""),{'uid':user.id,'title':title[:180],'url':url[:2000],'creative':creative[:2000],'budget':budget}).first()
-    db.commit(); return {'ok':True,'ad_id':row.id,'status':'pending'}
+    if len(title)<3 or not url.startswith('https://') or budget<=0 or len(reference)<4: raise HTTPException(400,'أدخل بيانات الإعلان ورقم مرجع التحويل أو الدفع')
+    row=db.execute(text("""insert into wesla_ads(advertiser_user_id,title,destination_url,creative_url,budget,payment_reference)
+      values (:uid,:title,:url,:creative,:budget,:reference) returning id"""),{'uid':user.id,'title':title[:180],'url':url[:2000],'creative':creative[:2000],'budget':budget,'reference':reference[:180]}).first()
+    db.commit(); return {'ok':True,'ad_id':row.id,'status':'pending','message':'تم استلام الإعلان وإثبات الدفع للمراجعة اليدوية'}
 
 @app.get('/api/advanced/marketing-library')
 def marketing_library(user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -3134,6 +3138,65 @@ def create_bundle(data:dict,user:User=Depends(require_role('merchant')),db:Sessi
       values (:uid,:title,:desc,cast(:ids as jsonb),:price,:ends,:active) returning id"""),
       {'uid':user.id,'title':title[:180],'desc':str(data.get('description',''))[:3000],'ids':json.dumps(ids),'price':price,'ends':ends,'active':bool(data.get('is_active',False))}).first()
     db.commit();return {'ok':True,'bundle_id':row.id,'regular_total':float(total),'bundle_price':float(price)}
+
+
+
+@app.get('/api/advanced/subscriptions/plans')
+def subscription_plans(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'premium_subscriptions',False): raise HTTPException(404,'الاشتراكات المدفوعة غير متاحة')
+    return [dict(x) for x in db.execute(text("select plan_code,title,price,duration_days,features from wesla_subscription_plans where is_active=true order by price")).mappings().all()]
+
+@app.get('/api/advanced/subscriptions/me')
+def my_subscriptions(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'premium_subscriptions',False): raise HTTPException(404,'الاشتراكات المدفوعة غير متاحة')
+    rows=db.execute(text("""select s.id,s.plan_code,p.title,s.status,s.starts_at,s.ends_at,s.payment_reference
+      from wesla_subscriptions s left join wesla_subscription_plans p on p.plan_code=s.plan_code
+      where s.user_id=:uid order by s.created_at desc limit 50"""),{'uid':user.id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/advanced/subscriptions')
+def request_subscription(data:dict,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'premium_subscriptions',False): raise HTTPException(404,'الاشتراكات المدفوعة غير متاحة')
+    code=str(data.get('plan_code','')).strip(); ref=str(data.get('payment_reference','')).strip()
+    plan=db.execute(text("select plan_code from wesla_subscription_plans where plan_code=:code and is_active=true"),{'code':code}).first()
+    if not plan or len(ref)<4: raise HTTPException(400,'اختر باقة متاحة وأدخل مرجع الدفع')
+    row=db.execute(text("insert into wesla_subscriptions(user_id,plan_code,payment_reference) values (:uid,:code,:ref) returning id"),{'uid':user.id,'code':code,'ref':ref[:180]}).first()
+    notify_user(db,user.id,'طلب اشتراك قيد المراجعة','استلمنا طلب الاشتراك وإثبات الدفع وسيتم مراجعته من الإدارة.')
+    db.commit();return {'ok':True,'subscription_id':row.id,'status':'pending'}
+
+@app.get('/api/admin/advanced/subscriptions')
+def admin_subscriptions(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select s.*,u.name,u.email,p.title as plan_title,p.duration_days from wesla_subscriptions s
+      join users u on u.id=s.user_id left join wesla_subscription_plans p on p.plan_code=s.plan_code
+      order by s.created_at desc limit 500""")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/advanced/subscription-plans')
+def admin_create_subscription_plan(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    code=str(data.get('plan_code','')).strip().lower();title=str(data.get('title','')).strip()
+    try: price=Decimal(str(data.get('price')));days=int(data.get('duration_days'))
+    except Exception: raise HTTPException(400,'السعر أو المدة غير صحيحة')
+    features=data.get('features',[])
+    if not re.fullmatch(r'[a-z0-9_-]{2,40}',code) or len(title)<2 or price<=0 or days<1 or days>3650 or not isinstance(features,list): raise HTTPException(400,'بيانات الباقة غير صحيحة')
+    db.execute(text("""insert into wesla_subscription_plans(plan_code,title,price,duration_days,features,is_active)
+      values (:code,:title,:price,:days,cast(:features as jsonb),:active)
+      on conflict(plan_code) do update set title=excluded.title,price=excluded.price,duration_days=excluded.duration_days,features=excluded.features,is_active=excluded.is_active"""),
+      {'code':code,'title':title[:120],'price':price,'days':days,'features':json.dumps(features),'active':bool(data.get('is_active',True))})
+    db.commit();return {'ok':True}
+
+@app.patch('/api/admin/advanced/subscriptions/{subscription_id}')
+def admin_decide_subscription(subscription_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    status=str(data.get('status',''))
+    if status not in ('active','rejected','cancelled'): raise HTTPException(400,'الحالة غير صحيحة')
+    row=db.execute(text("""select s.user_id,s.plan_code,p.duration_days from wesla_subscriptions s
+      join wesla_subscription_plans p on p.plan_code=s.plan_code where s.id=:id for update"""),{'id':subscription_id}).mappings().first()
+    if not row: raise HTTPException(404,'طلب الاشتراك غير موجود')
+    starts=datetime.now(timezone.utc) if status=='active' else None
+    ends=starts+timedelta(days=int(row['duration_days'])) if starts else None
+    db.execute(text("update wesla_subscriptions set status=:status,starts_at=:starts,ends_at=:ends where id=:id"),
+      {'status':'active' if status=='active' else ('cancelled' if status=='cancelled' else 'cancelled'),'starts':starts,'ends':ends,'id':subscription_id})
+    notify_user(db,row['user_id'],'تحديث الاشتراك','تم تفعيل اشتراكك.' if status=='active' else 'لم يتم اعتماد الاشتراك.')
+    db.commit();return {'ok':True,'status':status}
 
 
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
