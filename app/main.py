@@ -868,6 +868,14 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     notify_wesla_product_alerts(db,p,None)
     db.add(order)
     db.flush()
+    if wesla_feature_enabled(db,'fraud_detection',False):
+        phone_orders=int(db.scalar(select(func.count(Order.id)).where(Order.customer_phone==data.customer_phone.strip(),Order.created_at>=datetime.now(timezone.utc)-timedelta(minutes=15))) or 0)
+        risk=min(100,max(0,(phone_orders-2)*25))
+        if data.quantity>=10: risk=min(100,risk+25)
+        if risk>=40:
+            db.execute(text("""insert into wesla_fraud_events(user_id,order_id,event_type,risk_score,details)
+              values (:uid,:oid,'rapid_repeat_orders',:score,cast(:details as jsonb))"""),
+              {'uid':customer_user_id,'oid':order.id,'score':risk,'details':json.dumps({'recent_orders_same_phone':phone_orders,'quantity':data.quantity})})
     if wesla_feature_enabled(db, 'advanced_order_tracking', False):
         db.execute(text("insert into wesla_order_status_history(order_id,status,actor_role,note) values (:oid,:status,'system','تم استلام الطلب')"), {'oid':order.id,'status':order.status})
     if coupon:
