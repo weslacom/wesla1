@@ -2742,6 +2742,215 @@ def admin_award_achievement(achievement_id:int,target_user_id:int,user:User=Depe
     return {'ok':True,'achievement_id':achievement_id,'user_id':target_user_id}
 
 
+
+# Disputes, verified reviews, price/inventory alerts, competitions and paid promotion.
+@app.post('/api/advanced/disputes')
+def open_dispute(data:dict,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'disputes_center',False): raise HTTPException(404,'مركز النزاعات غير متاح')
+    order=db.scalar(select(Order).where(Order.order_number==str(data.get('order_number','')).strip().upper()))
+    if not order or user.id not in (order.customer_user_id,order.merchant_id) and user.role!='admin': raise HTTPException(404,'الطلب غير موجود لحسابك')
+    reason=str(data.get('reason','')).strip(); details=str(data.get('details','')).strip()
+    if len(reason)<3 or len(details)<10: raise HTTPException(400,'اكتب سبب النزاع وتفاصيل واضحة')
+    row=db.execute(text("""insert into wesla_disputes(order_id,opened_by_user_id,reason,details)
+      values (:oid,:uid,:reason,:details) returning id"""),{'oid':order.id,'uid':user.id,'reason':reason[:180],'details':details[:8000]}).first()
+    notify_user(db,order.merchant_id,'فتح نزاع على طلب',f'تم فتح نزاع بخصوص الطلب {order.order_number}')
+    db.commit(); return {'ok':True,'dispute_id':row.id}
+
+@app.get('/api/advanced/disputes')
+def my_disputes(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'disputes_center',False): raise HTTPException(404,'مركز النزاعات غير متاح')
+    rows=db.execute(text("""select d.id,o.order_number,d.reason,d.details,d.status,d.resolution,d.created_at,d.updated_at
+      from wesla_disputes d join orders o on o.id=d.order_id
+      where d.opened_by_user_id=:uid or o.customer_user_id=:uid or o.merchant_id=:uid
+      order by d.updated_at desc limit 100"""),{'uid':user.id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/advanced/disputes/{dispute_id}/messages')
+def dispute_message(dispute_id:int,data:dict,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    d=db.execute(text("""select d.id,d.status,o.customer_user_id,o.merchant_id,d.opened_by_user_id from wesla_disputes d
+      join orders o on o.id=d.order_id where d.id=:id"""),{'id':dispute_id}).mappings().first()
+    if not d or user.role!='admin' and user.id not in (d['customer_user_id'],d['merchant_id'],d['opened_by_user_id']): raise HTTPException(404,'النزاع غير موجود')
+    if d['status'] in ('resolved_merchant','resolved_customer','closed'): raise HTTPException(409,'النزاع مغلق')
+    message=str(data.get('message','')).strip()
+    if len(message)<2: raise HTTPException(400,'اكتب رسالة')
+    db.execute(text("insert into wesla_dispute_messages(dispute_id,sender_user_id,message,evidence_url) values (:id,:uid,:msg,:url)"),
+      {'id':dispute_id,'uid':user.id,'msg':message[:8000],'url':str(data.get('evidence_url',''))[:2000]})
+    db.execute(text("update wesla_disputes set status='under_review',updated_at=now() where id=:id"),{'id':dispute_id})
+    db.commit(); return {'ok':True}
+
+@app.get('/api/advanced/disputes/{dispute_id}/messages')
+def dispute_messages(dispute_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    d=db.execute(text("""select d.opened_by_user_id,o.customer_user_id,o.merchant_id from wesla_disputes d join orders o on o.id=d.order_id where d.id=:id"""),{'id':dispute_id}).mappings().first()
+    if not d or user.role!='admin' and user.id not in (d['opened_by_user_id'],d['customer_user_id'],d['merchant_id']): raise HTTPException(404,'النزاع غير موجود')
+    rows=db.execute(text("select sender_user_id,message,evidence_url,created_at from wesla_dispute_messages where dispute_id=:id order by id"),{'id':dispute_id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/disputes')
+def admin_disputes(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select d.*,o.order_number,o.customer_name,o.merchant_id from wesla_disputes d join orders o on o.id=d.order_id order by d.updated_at desc limit 300""")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.patch('/api/admin/advanced/disputes/{dispute_id}')
+def admin_resolve_dispute(dispute_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    status=str(data.get('status',''))
+    if status not in ('under_review','resolved_merchant','resolved_customer','closed'): raise HTTPException(400,'حالة النزاع غير صحيحة')
+    resolution=str(data.get('resolution','')).strip()
+    if status.startswith('resolved') and len(resolution)<5: raise HTTPException(400,'اكتب قرار التسوية')
+    row=db.execute(text("""update wesla_disputes set status=:status,resolution=:resolution,assigned_admin_id=:admin,updated_at=now()
+      where id=:id returning order_id,opened_by_user_id"""),{'status':status,'resolution':resolution[:8000],'admin':user.id,'id':dispute_id}).mappings().first()
+    if not row: raise HTTPException(404,'النزاع غير موجود')
+    notify_user(db,row['opened_by_user_id'],'تحديث النزاع',f'تم تحديث حالة النزاع إلى {status}')
+    db.commit(); return {'ok':True}
+
+@app.post('/api/advanced/reviews')
+def create_verified_review(data:dict,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'verified_reviews',False): raise HTTPException(404,'التقييمات الموثقة غير متاحة')
+    order=db.scalar(select(Order).where(Order.order_number==str(data.get('order_number','')).strip().upper(),Order.customer_user_id==user.id,Order.status=='delivered'))
+    if not order: raise HTTPException(409,'التقييم متاح فقط لصاحب طلب تم تسليمه')
+    rating=int(data.get('rating',0)); review=str(data.get('review','')).strip()
+    if rating not in range(1,6) or len(review)<5: raise HTTPException(400,'اختر تقييمًا من 1 إلى 5 واكتب تعليقًا')
+    try:
+        row=db.execute(text("""insert into wesla_product_reviews(order_id,product_id,customer_user_id,rating,review,is_published)
+          values (:oid,:pid,:uid,:rating,:review,false) returning id"""),
+          {'oid':order.id,'pid':order.product_id,'uid':user.id,'rating':rating,'review':review[:3000]}).first()
+    except Exception:
+        db.rollback(); raise HTTPException(409,'سبق لك تقييم هذا الطلب')
+    db.commit(); return {'ok':True,'review_id':row.id,'status':'pending_moderation'}
+
+@app.get('/api/products/{product_id}/verified-reviews')
+def list_verified_reviews(product_id:int,db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'verified_reviews',False): raise HTTPException(404,'التقييمات الموثقة غير متاحة')
+    rows=db.execute(text("""select r.rating,r.review,r.created_at,u.name as reviewer
+      from wesla_product_reviews r join users u on u.id=r.customer_user_id
+      where r.product_id=:pid and r.is_published=true order by r.created_at desc limit 100"""),{'pid':product_id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/reviews')
+def admin_reviews(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select r.*,o.order_number,p.title,u.name as customer from wesla_product_reviews r
+      join orders o on o.id=r.order_id join products p on p.id=r.product_id join users u on u.id=r.customer_user_id
+      order by r.created_at desc limit 300""")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.patch('/api/admin/advanced/reviews/{review_id}')
+def admin_moderate_review(review_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    published=data.get('is_published')
+    if not isinstance(published,bool): raise HTTPException(400,'حالة النشر غير صحيحة')
+    row=db.execute(text("update wesla_product_reviews set is_published=:v where id=:id returning customer_user_id"),{'v':published,'id':review_id}).first()
+    if not row: raise HTTPException(404,'التقييم غير موجود')
+    notify_user(db,row.customer_user_id,'مراجعة تقييمك', 'تم نشر تقييمك.' if published else 'تم إخفاء تقييمك بعد المراجعة.')
+    db.commit(); return {'ok':True}
+
+@app.post('/api/advanced/price-alerts')
+def create_price_alert(data:dict,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'price_drop_alerts',False): raise HTTPException(404,'تنبيهات انخفاض السعر غير متاحة')
+    p=db.get(Product,int(data.get('product_id',0)))
+    try: target=Decimal(str(data.get('target_price')))
+    except Exception: raise HTTPException(400,'السعر المستهدف غير صحيح')
+    if not p or p.status!='active' or target<=0 or target>=Decimal(str(p.price)): raise HTTPException(400,'حدد سعرًا أقل من السعر الحالي لمنتج متاح')
+    db.execute(text("""insert into wesla_price_alerts(user_id,product_id,target_price) values (:uid,:pid,:price)
+      on conflict(user_id,product_id) do update set target_price=excluded.target_price,is_active=true,notified_at=null"""),
+      {'uid':user.id,'pid':p.id,'price':target})
+    db.commit(); return {'ok':True,'message':'تم تسجيل تنبيه السعر'}
+
+@app.get('/api/advanced/price-alerts')
+def my_price_alerts(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select a.id,a.target_price,a.is_active,a.notified_at,p.id as product_id,p.title,p.price
+      from wesla_price_alerts a join products p on p.id=a.product_id where a.user_id=:uid order by a.created_at desc"""),{'uid':user.id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.delete('/api/advanced/price-alerts/{alert_id}')
+def delete_price_alert(alert_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    r=db.execute(text("delete from wesla_price_alerts where id=:id and user_id=:uid returning id"),{'id':alert_id,'uid':user.id}).first()
+    if not r: raise HTTPException(404,'التنبيه غير موجود')
+    db.commit(); return {'ok':True}
+
+@app.post('/api/advanced/inventory-alerts')
+def set_inventory_alert(data:dict,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'inventory_order_alerts',False): raise HTTPException(404,'تنبيهات المخزون غير متاحة')
+    pid=int(data.get('product_id',0)); threshold=int(data.get('threshold',5))
+    p=db.scalar(select(Product).where(Product.id==pid,Product.merchant_id==user.id))
+    if not p or threshold<0 or threshold>100000: raise HTTPException(400,'المنتج أو حد التنبيه غير صحيح')
+    db.execute(text("""insert into wesla_inventory_alerts(merchant_id,product_id,threshold) values (:uid,:pid,:t)
+      on conflict(merchant_id,product_id) do update set threshold=excluded.threshold,is_active=true"""),{'uid':user.id,'pid':pid,'t':threshold})
+    db.commit(); return {'ok':True}
+
+@app.get('/api/advanced/inventory-alerts')
+def get_inventory_alerts(user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select a.id,a.threshold,p.id as product_id,p.title,p.stock,a.last_notified_at
+      from wesla_inventory_alerts a join products p on p.id=a.product_id where a.merchant_id=:uid and a.is_active=true order by p.stock asc"""),{'uid':user.id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/competitions')
+def admin_competitions(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select c.*,(select count(*) from wesla_competition_entries e where e.competition_id=c.id)::int as entrants
+      from wesla_competitions c order by c.created_at desc""")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/advanced/competitions')
+def create_competition(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    title=str(data.get('title','')).strip(); description=str(data.get('description','')).strip()
+    try: starts=datetime.fromisoformat(str(data['starts_at']).replace('Z','+00:00')); ends=datetime.fromisoformat(str(data['ends_at']).replace('Z','+00:00'))
+    except Exception: raise HTTPException(400,'حدد تاريخ البداية والنهاية')
+    if len(title)<3 or ends<=starts: raise HTTPException(400,'بيانات المسابقة غير صحيحة')
+    row=db.execute(text("""insert into wesla_competitions(title,description,starts_at,ends_at,prize_description,criteria,is_active)
+      values (:title,:desc,:starts,:ends,:prize,cast(:criteria as jsonb),:active) returning id"""),
+      {'title':title[:180],'desc':description[:4000],'starts':starts,'ends':ends,'prize':str(data.get('prize_description',''))[:2000],
+       'criteria':json.dumps(data.get('criteria',{})),'active':bool(data.get('is_active',False))}).first()
+    db.commit(); return {'ok':True,'id':row.id}
+
+@app.get('/api/advanced/competitions')
+def public_competitions(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'marketer_competitions',False): raise HTTPException(404,'المسابقات غير متاحة')
+    rows=db.execute(text("""select c.id,c.title,c.description,c.starts_at,c.ends_at,c.prize_description,
+      coalesce(e.score,0) as my_score from wesla_competitions c left join wesla_competition_entries e
+      on e.competition_id=c.id and e.marketer_id=:uid where c.is_active=true and c.starts_at<=now() and c.ends_at>now()
+      order by c.ends_at"""),{'uid':user.id}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/ads')
+def admin_ads(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("select * from wesla_ads order by created_at desc limit 300")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.patch('/api/admin/advanced/ads/{ad_id}')
+def admin_ad_decision(ad_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    status=str(data.get('status',''))
+    if status not in ('approved','rejected','paused','completed'): raise HTTPException(400,'حالة الإعلان غير صحيحة')
+    row=db.execute(text("update wesla_ads set status=:s where id=:id returning advertiser_user_id"),{'s':status,'id':ad_id}).first()
+    if not row: raise HTTPException(404,'الإعلان غير موجود')
+    notify_user(db,row.advertiser_user_id,'تحديث حالة إعلانك',f'حالة الإعلان الآن: {status}')
+    db.commit(); return {'ok':True}
+
+@app.post('/api/advanced/ads')
+def submit_ad(data:dict,user:User=Depends(require_role('merchant')),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'ads_center',False): raise HTTPException(404,'مركز الإعلانات غير متاح')
+    title=str(data.get('title','')).strip(); url=str(data.get('destination_url','')).strip()
+    creative=str(data.get('creative_url','')).strip()
+    try: budget=Decimal(str(data.get('budget')))
+    except Exception: raise HTTPException(400,'الميزانية غير صحيحة')
+    if len(title)<3 or not url.startswith('https://') or budget<=0: raise HTTPException(400,'بيانات الإعلان غير صحيحة')
+    row=db.execute(text("""insert into wesla_ads(advertiser_user_id,title,destination_url,creative_url,budget)
+      values (:uid,:title,:url,:creative,:budget) returning id"""),{'uid':user.id,'title':title[:180],'url':url[:2000],'creative':creative[:2000],'budget':budget}).first()
+    db.commit(); return {'ok':True,'ad_id':row.id,'status':'pending'}
+
+@app.get('/api/advanced/marketing-library')
+def marketing_library(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not wesla_feature_enabled(db,'marketing_library',False): raise HTTPException(404,'مكتبة التسويق غير متاحة')
+    rows=db.execute(text("select id,title,asset_type,asset_url,body,audience,created_at from wesla_marketing_assets where is_published=true and audience in ('all',:role) order by created_at desc limit 200"),{'role':user.role}).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.post('/api/admin/advanced/marketing-library')
+def create_marketing_asset(data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    title=str(data.get('title','')).strip(); kind=str(data.get('asset_type','copy'))
+    audience=str(data.get('audience','all')); url=str(data.get('asset_url','')).strip(); body=str(data.get('body',''))
+    if len(title)<2 or kind not in ('image','video','copy','file','link') or audience not in ('all','merchant','affiliate','customer'): raise HTTPException(400,'بيانات المادة التسويقية غير صحيحة')
+    if url and not (url.startswith('https://') or url.startswith('/')): raise HTTPException(400,'رابط المادة غير صالح')
+    row=db.execute(text("""insert into wesla_marketing_assets(owner_user_id,title,asset_type,asset_url,body,audience,is_published)
+      values (:uid,:title,:kind,:url,:body,:audience,:published) returning id"""),{'uid':user.id,'title':title[:180],'kind':kind,'url':url[:2000],'body':body[:10000],'audience':audience,'published':bool(data.get('is_published',False))}).first()
+    db.commit(); return {'ok':True,'id':row.id}
+
+
 # Friendly public routes: unknown non-API paths serve the app shell so shared links
 # and custom pages work without requiring a special /chat suffix.
 @app.get('/{full_path:path}')
