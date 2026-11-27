@@ -772,6 +772,54 @@ def track(code:str,request:Request,db:Session=Depends(get_db)):
     response=RedirectResponse(url=f'/?product={link.product_id}',status_code=302)
     response.set_cookie('wesla_ref',code,httponly=True,samesite='lax',max_age=60*60*24*30)
     return response
+
+def notify_wesla_product_alerts(db:Session,product:Product,old_price=None):
+    try:
+        if wesla_feature_enabled(db,'price_drop_alerts',False) and old_price is not None and Decimal(str(product.price))<Decimal(str(old_price)):
+            alerts=db.execute(text("""select id,user_id,target_price from wesla_price_alerts
+              where product_id=:pid and is_active=true and notified_at is null and target_price>=:price"""),
+              {'pid':product.id,'price':product.price}).mappings().all()
+            for a in alerts:
+                notify_user(db,a['user_id'],'السعر وصل للحد الذي حددته',f'انخفض سعر {product.title} إلى {product.price} جنيه.')
+                db.execute(text("update wesla_price_alerts set notified_at=now(),is_active=false where id=:id"),{'id':a['id']})
+        if wesla_feature_enabled(db,'inventory_order_alerts',False):
+            alerts=db.execute(text("""select id,merchant_id,threshold from wesla_inventory_alerts
+              where product_id=:pid and is_active=true and :stock<=threshold
+              and (last_notified_at is null or last_notified_at<now()-interval '24 hours')"""),
+              {'pid':product.id,'stock':product.stock}).mappings().all()
+            for a in alerts:
+                notify_user(db,a['merchant_id'],'تنبيه انخفاض المخزون',f'المخزون المتبقي من {product.title}: {product.stock}')
+                db.execute(text("update wesla_inventory_alerts set last_notified_at=now() where id=:id"),{'id':a['id']})
+    except Exception:
+        # Alert failures must never roll back a legitimate order/product update.
+        pass
+
+@app.patch('/api/merchant/products/{product_id}')
+def update_merchant_product(product_id:int,data:dict,user:User=Depends(require_role('merchant','admin')),db:Session=Depends(get_db)):
+    p=db.get(Product,product_id)
+    if not p or user.role!='admin' and p.merchant_id!=user.id: raise HTTPException(404,'المنتج غير موجود')
+    old_price=Decimal(str(p.price))
+    if 'title' in data:
+        title=str(data['title']).strip()
+        if len(title)<3: raise HTTPException(400,'اسم المنتج قصير')
+        p.title=title[:180]
+    if 'description' in data: p.description=str(data['description'])[:5000]
+    if 'price' in data:
+        try: price=Decimal(str(data['price']))
+        except Exception: raise HTTPException(400,'السعر غير صحيح')
+        if price<=0: raise HTTPException(400,'السعر يجب أن يكون أكبر من صفر')
+        p.price=price
+    if 'stock' in data:
+        try: stock=int(data['stock'])
+        except Exception: raise HTTPException(400,'المخزون غير صحيح')
+        if stock<0: raise HTTPException(400,'المخزون لا يمكن أن يكون سالبًا')
+        if p.has_variants: raise HTTPException(400,'عدّل مخزون المنتجات ذات المقاسات من شاشة المقاسات')
+        p.stock=stock
+        p.status='active' if stock>0 else 'sold_out'
+    notify_wesla_product_alerts(db,p,old_price)
+    db.commit();db.refresh(p)
+    return product_out(p,db)
+
 @app.post('/api/orders')
 def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     p=db.scalar(select(Product).where(Product.id==data.product_id).with_for_update())
@@ -817,6 +865,7 @@ def create_order(data:OrderIn,request:Request,db:Session=Depends(get_db)):
     # Hide the product from all public catalogues as soon as its total stock reaches zero.
     # Keep the product/order history in the database; it can be republished by restocking.
     if p.stock<=0: p.status='sold_out'
+    notify_wesla_product_alerts(db,p,None)
     db.add(order)
     db.flush()
     if wesla_feature_enabled(db, 'advanced_order_tracking', False):
@@ -2918,6 +2967,25 @@ def public_competitions(user:User=Depends(current_user),db:Session=Depends(get_d
       on e.competition_id=c.id and e.marketer_id=:uid where c.is_active=true and c.starts_at<=now() and c.ends_at>now()
       order by c.ends_at"""),{'uid':user.id}).mappings().all()
     return [dict(x) for x in rows]
+
+@app.get('/api/admin/advanced/marketing-library')
+def admin_marketing_assets(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    return [dict(x) for x in db.execute(text("select * from wesla_marketing_assets order by created_at desc limit 300")).mappings().all()]
+
+@app.get('/api/admin/advanced/fraud-events')
+def admin_fraud_events(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select f.*,u.name,o.order_number from wesla_fraud_events f
+      left join users u on u.id=f.user_id left join orders o on o.id=f.order_id
+      order by f.created_at desc limit 500""")).mappings().all()
+    return [dict(x) for x in rows]
+
+@app.patch('/api/admin/advanced/fraud-events/{event_id}')
+def admin_review_fraud_event(event_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    status=str(data.get('status',''))
+    if status not in ('reviewed','false_positive','confirmed'): raise HTTPException(400,'الحالة غير صحيحة')
+    row=db.execute(text("update wesla_fraud_events set status=:s where id=:id returning id"),{'s':status,'id':event_id}).first()
+    if not row: raise HTTPException(404,'الحدث غير موجود')
+    db.commit();return {'ok':True}
 
 @app.get('/api/admin/advanced/ads')
 def admin_ads(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
