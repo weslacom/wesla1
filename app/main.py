@@ -2032,7 +2032,7 @@ def admin_adjust_reward_points(data:dict,user:User=Depends(require_role('admin')
 # Only systems with implemented user-facing flows and real backend routes can be enabled.
 # The remaining switches stay visible in admin as "in development" and are not exposed to users.
 FEATURE_READY = {
-    'referrals': True, 'rewards': True, 'trends': False, 'challenges': False,
+    'referrals': True, 'rewards': True, 'trends': True, 'challenges': False,
     'achievements': False, 'academy': False,
     'wesla_ai': False, 'recommendations': False, 'seasonal_campaigns': False,
     'fraud_detection': False, 'admin_activity_log': True, 'smart_marketer_matching': False,
