@@ -1884,7 +1884,9 @@ def advanced_referrals_me(user:User=Depends(current_user),db:Session=Depends(get
         db.commit()
         row=db.execute(text("select code from wesla_referral_codes where user_id=:uid"),{'uid':user.id}).mappings().first()
     referrals=db.execute(text("select status,count(*)::int as total,coalesce(sum(reward_points),0)::bigint as points from wesla_referrals where referrer_user_id=:uid group by status"),{'uid':user.id}).mappings().all()
-    return {'code':row['code'],'referrals':[dict(x) for x in referrals]}
+    cfg=db.execute(text("select config,is_enabled from wesla_feature_settings where feature_key='referrals'")).mappings().first()
+    reward_points=int(((cfg or {}).get('config') or {}).get('referral_reward_points',0))
+    return {'code':row['code'],'referrals':[dict(x) for x in referrals],'reward_points':reward_points,'reward_enabled':bool(cfg and cfg['is_enabled'])}
 
 @app.get('/api/advanced/trends')
 def advanced_trends(period:int=Query(default=7,ge=1,le=30),limit:int=Query(default=20,ge=1,le=50),db:Session=Depends(get_db)):
