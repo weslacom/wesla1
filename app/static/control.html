@@ -136,7 +136,7 @@ async function adminActivityLog(){
 }
 async function advancedFeaturesAdmin(){
  try{
-  const rows=await api('/api/admin/advanced/settings');
+  const [rows,readiness]=await Promise.all([api('/api/admin/advanced/settings'),api('/api/advanced/features')]);
   const map=Object.fromEntries(rows.map(x=>[x.feature_key,x]));
   const keys=[
    ['wesla_ai','Wesla AI','مساعدات الذكاء الاصطناعي','🤖'],
@@ -164,7 +164,7 @@ async function advancedFeaturesAdmin(){
    ['price_drop_alerts','تنبيهات انخفاض الأسعار','متابعة الأسعار وإشعارات الانخفاض','🔔'],
    ['bundles_deals','العروض والباقات المشتركة','باقات منتجات من تاجر أو أكثر','🎀']
   ];
-  $('#content').innerHTML='<h2>مركز التحكم في الأنظمة الذكية والمتقدمة</h2><p class="small">كل الأنظمة متاحة للتحكم المستقل. شغّل النظام ليظهر اختصاره المثبّت أسفل لوحة الإدارة، وأوقفه لإزالة الاختصار فورًا. إيقاف النظام لا يحذف بياناته أو إعداداته.</p>'+keys.map(([key,title,desc,icon])=>{const x=map[key]||{};const enabled=!!x.is_enabled;return '<div class="item"><div class="row" style="justify-content:space-between;align-items:center"><div><b>'+icon+' '+title+'</b><p class="small">'+desc+'</p><span class="small" id="feature-state-'+key+'">'+(enabled?'مفعّل — اختصاره ظاهر أسفل اللوحة':'متوقف — الاختصار مخفي')+'</span></div><label><input type="checkbox" id="feature-'+key+'" '+(enabled?'checked':'')+' style="width:auto"> '+(enabled?'مفعّل':'متوقف')+'</label></div></div>'}).join('')+'<h3>مؤشرات المنتجات الرائجة</h3><div id="adminTrendPreview" class="item">جارٍ تحميل المؤشرات…</div>';
+  $('#content').innerHTML='<h2>مركز التحكم في الأنظمة الذكية والمتقدمة</h2><p class="small">كل الأنظمة متاحة للتحكم المستقل. شغّل النظام ليظهر اختصاره المثبّت أسفل لوحة الإدارة، وأوقفه لإزالة الاختصار فورًا. إيقاف النظام لا يحذف بياناته أو إعداداته.</p>'+keys.map(([key,title,desc,icon])=>{const x=map[key]||{};const ready=readiness[key]===true;const enabled=ready&&!!x.is_enabled;return '<div class="item"><div class="row" style="justify-content:space-between;align-items:center"><div><b>'+icon+' '+title+'</b><p class="small">'+desc+'</p><span class="small" id="feature-state-'+key+'">'+(ready?(enabled?'مفعّل — اختصاره ظاهر أسفل اللوحة':'متوقف — الاختصار مخفي'):'قيد التنفيذ والاختبار — غير متاح للمستخدمين بعد')+'</span></div><label><input type="checkbox" id="feature-'+key+'" '+(enabled?'checked':'')+(!ready?' disabled':'')+' style="width:auto"> '+(ready?(enabled?'مفعّل':'متوقف'):'قيد التطوير')+'</label></div></div>'}).join('')+'<h3>مؤشرات المنتجات الرائجة</h3><div id="adminTrendPreview" class="item">جارٍ تحميل المؤشرات…</div>';
   keys.forEach(([key])=>{const el=$('#feature-'+key);el.onchange=()=>saveAdvancedFeature(key)});
   try{const t=await api('/api/advanced/trends?period=7&limit=10');$('#adminTrendPreview').innerHTML=t.items&&t.items.length?t.items.map(p=>'<p><b>'+esc(p.title)+'</b> — مشاهدات '+p.views+' | طلبات '+p.order_signals+' | التفاعل '+p.trend_score+'</p>').join(''):'<p class="muted">لا توجد بيانات ترند كافية حتى الآن.</p>'}catch(e){$('#adminTrendPreview').textContent='تعذر تحميل مؤشرات الترند: '+e.message}
  }catch(e){msg(e.message,true)}
