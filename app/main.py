@@ -2952,7 +2952,7 @@ def set_competition_score(competition_id:int,marketer_id:int,data:dict,user:User
 @app.get('/api/advanced/competitions/{competition_id}/leaderboard')
 def competition_leaderboard(competition_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
     if not wesla_feature_enabled(db,'marketer_competitions',False): raise HTTPException(404,'المسابقات غير متاحة')
-    exists=db.scalar(select(func.count()).select_from(text('wesla_competitions')).where(text('id=:id and is_active=true and starts_at<=now() and ends_at>now()')).params(id=competition_id))
+    exists=db.execute(text('select count(*) from wesla_competitions where id=:id and is_active=true and starts_at<=now() and ends_at>now()'),{'id':competition_id}).scalar()
     if not exists: raise HTTPException(404,'المسابقة غير متاحة')
     rows=db.execute(text("""select e.marketer_id,u.name,e.score from wesla_competition_entries e
       join users u on u.id=e.marketer_id where e.competition_id=:id order by e.score desc,e.created_at asc limit 50"""),{'id':competition_id}).mappings().all()
