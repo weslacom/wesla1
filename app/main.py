@@ -2881,6 +2881,17 @@ def get_inventory_alerts(user:User=Depends(require_role('merchant')),db:Session=
       from wesla_inventory_alerts a join products p on p.id=a.product_id where a.merchant_id=:uid and a.is_active=true order by p.stock asc"""),{'uid':user.id}).mappings().all()
     return [dict(x) for x in rows]
 
+@app.patch('/api/admin/advanced/competitions/{competition_id}/score/{marketer_id}')
+def set_competition_score(competition_id:int,marketer_id:int,data:dict,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    try: score=Decimal(str(data.get('score')))
+    except Exception: raise HTTPException(400,'النتيجة غير صحيحة')
+    if score<0 or score>100000000: raise HTTPException(400,'النتيجة خارج النطاق')
+    exists=db.scalar(select(User).where(User.id==marketer_id,User.role=='affiliate'))
+    if not exists: raise HTTPException(404,'المسوق غير موجود')
+    db.execute(text("""insert into wesla_competition_entries(competition_id,marketer_id,score) values (:cid,:uid,:score)
+      on conflict(competition_id,marketer_id) do update set score=excluded.score"""),{'cid':competition_id,'uid':marketer_id,'score':score})
+    db.commit();return {'ok':True}
+
 @app.get('/api/admin/advanced/competitions')
 def admin_competitions(user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     rows=db.execute(text("""select c.*,(select count(*) from wesla_competition_entries e where e.competition_id=c.id)::int as entrants
@@ -2999,7 +3010,7 @@ def marketer_matches(product_id:int,user:User=Depends(require_role('merchant','a
       coalesce(sum(o.affiliate_commission),0)::numeric(12,2) as earned,
       count(distinct l.id)::int as active_links
       from users u left join orders o on o.affiliate_id=u.id and o.status='delivered'
-      left join links l on l.affiliate_id=u.id
+      left join affiliate_links l on l.affiliate_id=u.id
       where u.role='affiliate' and u.status='active'
       group by u.id,u.name order by delivered_orders desc,active_links desc limit 30""")).mappings().all()
     return [{'user_id':x['id'],'name':x['name'],'delivered_orders':x['delivered_orders'],'earned':float(x['earned']),'active_links':x['active_links'],
