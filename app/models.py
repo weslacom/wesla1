@@ -104,6 +104,7 @@ class Contract(Base):
     body: Mapped[str]=mapped_column(Text)
     merchant_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True, index=True)
     affiliate_id: Mapped[int|None]=mapped_column(ForeignKey('users.id'), nullable=True, index=True)
+    participant_ids: Mapped[list]=mapped_column(JSONB, default=list)
     commission_rate: Mapped[float|None]=mapped_column(Numeric(5,2), nullable=True)
     penalty_terms: Mapped[str]=mapped_column(Text, default='')
     status: Mapped[str]=mapped_column(String(20), default='draft', index=True)
@@ -135,6 +136,7 @@ class ContractAcceptance(Base):
     accepted_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
     ip_address: Mapped[str]=mapped_column(String(64), default='')
     user_agent: Mapped[str]=mapped_column(String(500), default='')
+    signature_data_url: Mapped[str|None]=mapped_column(Text, nullable=True)
     __table_args__=(UniqueConstraint('contract_id','user_id'),)
 
 
