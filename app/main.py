@@ -2751,6 +2751,13 @@ def admin_update_challenge(challenge_id:int,data:dict,user:User=Depends(require_
     db.commit()
     return {'ok':True}
 
+@app.get('/api/admin/advanced/challenges/{challenge_id}/participants')
+def admin_challenge_participants(challenge_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
+    rows=db.execute(text("""select p.id,p.user_id,u.name,u.email,p.status,p.created_at,p.completed_at
+      from wesla_challenge_participations p join users u on u.id=p.user_id
+      where p.challenge_id=:cid order by p.created_at"""),{'cid':challenge_id}).mappings().all()
+    return [dict(x) for x in rows]
+
 @app.post('/api/admin/advanced/challenges/{challenge_id}/complete/{participant_id}')
 def admin_complete_challenge(challenge_id:int,participant_id:int,user:User=Depends(require_role('admin')),db:Session=Depends(get_db)):
     row=db.execute(text("""select p.user_id,p.status,c.reward_points,c.title from wesla_challenge_participations p
